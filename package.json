@@ -1,0 +1,21 @@
+{
+  "name": "atlasync",
+  "version": "1.0.0",
+  "scripts": {
+    "dev": "next dev",
+    "build": "next build",
+    "start": "next start",
+    "lint": "next lint"
+  },
+  "dependencies": {
+    "next": "14.x",
+    "react": "18.x",
+    "react-dom": "18.x",
+    "tailwindcss": "^3.3.0",
+    "autoprefixer": "^10.4.0",
+    "postcss": "^8.4.0",
+    "three": "^0.158.0",
+    "mapbox-gl": "^2.15.0",
+    "@supabase/supabase-js": "^2.12.0"
+  }
+}
