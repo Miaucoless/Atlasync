@@ -2,9 +2,10 @@
  * TripDayCard.js
  * Expandable day-of-trip card showing all locations with type icons,
  * order numbers, estimated travel times, and inline edit/delete.
+ * Clicking a location expands it inline to show ratings, reviews, and details.
  */
 
-import { useState } from 'react';
+import { useState, useEffect } from 'react';
 import { estimateTravelTime, haversineDistance } from '../utils/routeOptimizer';
 
 /* Location type config */
@@ -29,6 +30,8 @@ export default function TripDayCard({
 }) {
   const locations = day.trip_locations ?? [];
   const sorted    = [...locations].sort((a, b) => (a.visit_order ?? 0) - (b.visit_order ?? 0));
+  const [expandedLocId, setExpandedLocId] = useState(null);
+  const [locationRatings, setLocationRatings] = useState(null);
 
   function getDistanceToNext(idx) {
     if (idx >= sorted.length - 1) return null;
@@ -37,6 +40,29 @@ export default function TripDayCard({
     if (typeof a.lat !== 'number' || typeof b.lat !== 'number') return null;
     return haversineDistance(a.lat, a.lng, b.lat, b.lng);
   }
+
+  /* Fetch ratings when a location is expanded */
+  useEffect(() => {
+    if (!expandedLocId) {
+      setLocationRatings(null);
+      return;
+    }
+    const loc = sorted.find((l) => l.id === expandedLocId);
+    if (!loc?.name) {
+      setLocationRatings(null);
+      return;
+    }
+    setLocationRatings(null);
+    fetch('/api/ratings/aggregate', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ name: loc.name, lat: loc.lat, lng: loc.lng }),
+    })
+      .then((r) => r.json())
+      .then((data) => (data && typeof data.available === 'boolean' ? data : { available: false, sources: [] }))
+      .then(setLocationRatings)
+      .catch(() => setLocationRatings({ available: false, sources: [] }));
+  }, [expandedLocId, sorted]);
 
   return (
     <div className={`glass rounded-2xl overflow-hidden transition-all duration-300 ${className}`}>
@@ -99,9 +125,12 @@ export default function TripDayCard({
 
               return (
                 <div key={loc.id}>
-                  {/* Location row */}
+                  {/* Location row — click to expand and highlight on map */}
                   <div
-                    onClick={() => onLocationClick(loc)}
+                    onClick={() => {
+                      onLocationClick(loc);
+                      setExpandedLocId(expandedLocId === loc.id ? null : loc.id);
+                    }}
                     className={`
                       relative flex items-start gap-3 py-3 pl-3 pr-3 rounded-xl cursor-pointer
                       transition-all duration-200 group/loc
@@ -141,13 +170,13 @@ export default function TripDayCard({
                         </span>
                       </div>
 
-                      {loc.notes && (
+                      {expandedLocId !== loc.id && loc.notes && (
                         <p className="text-xs text-atlas-text-secondary mt-1 line-clamp-2 italic">
                           "{loc.notes}"
                         </p>
                       )}
 
-                      {loc.duration_minutes && (
+                      {expandedLocId !== loc.id && loc.duration_minutes && (
                         <span className="inline-flex items-center gap-1 text-[10px] text-atlas-text-muted mt-1.5">
                           <ClockIcon /> {loc.duration_minutes} min
                         </span>
@@ -163,6 +192,45 @@ export default function TripDayCard({
                       <TrashIcon />
                     </button>
                   </div>
+
+                  {/* Expanded: ratings, reviews, full notes, duration */}
+                  {expandedLocId === loc.id && (
+                    <div className="ml-10 mr-3 mt-0 mb-2 px-3 py-2 rounded-lg bg-white/[0.04] border border-white/[0.06] text-xs">
+                      {locationRatings === null ? (
+                        <div className="mb-2 text-atlas-text-muted">Loading ratings…</div>
+                      ) : locationRatings.sources?.length > 0 ? (
+                        <div className="flex flex-wrap items-center gap-1.5 mb-2">
+                          {locationRatings.sources.map((src) => (
+                            <span
+                              key={src.source}
+                              title={src.title ? `${src.title}: ${src.rating}` : String(src.rating)}
+                              className="inline-flex items-center gap-1 px-1.5 py-0.5 rounded-md font-semibold border"
+                              style={{ color: src.color, background: `${src.color}18`, borderColor: `${src.color}40` }}
+                            >
+                              <span className="opacity-70">{src.label}</span>
+                              <span className="text-amber-400">★</span>
+                              <span>{src.rating}</span>
+                            </span>
+                          ))}
+                          {locationRatings.aggregate != null && (
+                            <span className="text-atlas-text-muted">avg {locationRatings.aggregate.toFixed(1)}</span>
+                          )}
+                          {locationRatings.totalReviews > 0 && (
+                            <span className="text-atlas-text-muted">{locationRatings.totalReviews.toLocaleString()} reviews</span>
+                          )}
+                        </div>
+                      ) : (
+                        <div className="mb-2 text-atlas-text-muted">No ratings found for this location.</div>
+                      )}
+                      {loc.address && <p className="text-atlas-text-secondary mb-1"><span className="text-atlas-text-muted">Address:</span> {loc.address}</p>}
+                      {loc.notes && <p className="text-atlas-text-secondary italic mb-1">"{loc.notes}"</p>}
+                      {loc.duration_minutes && (
+                        <p className="text-atlas-text-muted inline-flex items-center gap-1">
+                          <ClockIcon /> {loc.duration_minutes} min
+                        </p>
+                      )}
+                    </div>
+                  )}
 
                   {/* Travel time connector between stops */}
                   {distNext !== null && (

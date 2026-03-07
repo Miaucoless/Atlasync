@@ -17,7 +17,7 @@ import TripCard from '../components/TripCard';
 import AIChat   from '../components/AIChat';
 import {
   supabase, signInWithGoogle, getCurrentUser,
-  fetchTrips, createTrip, deleteTrip,
+  fetchTrips, createTrip, deleteTrip, insertTripDays,
 } from '../utils/supabaseClient';
 import {
   getCachedTrips, cacheTrips, cacheTrip, removeCachedTrip, isOnline,
@@ -35,6 +35,8 @@ function useDebounce(value, delay = 250) {
 
 /* ── Create trip form modal ─────────────────────────────────────────── */
 function CreateTripModal({ onClose, onCreated }) {
+  const router = useRouter();
+  const [step, setStep] = useState(1); // 1: details, 2: how to plan
   const [form, setForm] = useState({
     name:         '',
     description:  '',
@@ -49,17 +51,17 @@ function CreateTripModal({ onClose, onCreated }) {
     setForm((f) => ({ ...f, [e.target.name]: e.target.value }));
   }
 
-  async function handleSubmit(e) {
-    e.preventDefault();
+  async function createAndRedirect(mode) {
     if (!form.name.trim()) return setError('Trip name is required.');
     setSaving(true);
     setError(null);
 
+    const today = new Date().toISOString().slice(0, 10);
     const payload = {
       name:        form.name.trim(),
       description: form.description.trim() || null,
-      start_date:  form.start_date || null,
-      end_date:    form.end_date   || null,
+      start_date:  form.start_date?.trim() || today,
+      end_date:    form.end_date?.trim()   || null,
       destinations: form.destinations
         ? form.destinations.split(',').map((d) => d.trim()).filter(Boolean)
         : [],
@@ -73,9 +75,35 @@ function CreateTripModal({ onClose, onCreated }) {
       } else {
         trip = { ...payload, id: `local-${Date.now()}`, created_at: new Date().toISOString(), trip_days: [] };
       }
+
+      if (mode === 'blank') {
+        const emptyDay = {
+          id:             `local-day-${Date.now()}-1`,
+          trip_id:        trip.id,
+          day_number:     1,
+          title:          'Day 1',
+          trip_locations: [],
+        };
+        if (user && isOnline()) {
+          try {
+            const inserted = await insertTripDays(trip.id, [{ day_number: 1, title: 'Day 1' }]);
+            trip = { ...trip, trip_days: inserted };
+          } catch {
+            trip = { ...trip, trip_days: [emptyDay] };
+          }
+        } else {
+          trip = { ...trip, trip_days: [emptyDay] };
+        }
+      }
+
       cacheTrip(trip);
       onCreated(trip);
       onClose();
+
+      const path = `/trips/${trip.id}`;
+      if (mode === 'import') router.push(`${path}?import=1`);
+      else if (mode === 'ai') router.push(`${path}?generate=1`);
+      else router.push(path);
     } catch (err) {
       setError(err.message || 'Failed to create trip.');
     } finally {
@@ -83,10 +111,17 @@ function CreateTripModal({ onClose, onCreated }) {
     }
   }
 
+  function handleStep1Submit(e) {
+    e.preventDefault();
+    if (!form.name.trim()) return setError('Trip name is required.');
+    setError(null);
+    setStep(2);
+  }
+
   return (
     <div className="fixed inset-0 z-50 flex items-center justify-center px-4">
       <div className="absolute inset-0 bg-black/60 backdrop-blur-sm" onClick={onClose} />
-      <div className="relative glass-heavy rounded-2xl w-full max-w-md p-6 shadow-card"
+      <div className="relative glass-heavy rounded-2xl w-full max-w-md p-6 shadow-card max-h-[90vh] overflow-y-auto"
         style={{ animation: 'slide-up 0.35s cubic-bezier(0.25,0.46,0.45,0.94) both' }}>
         <div className="flex items-center justify-between mb-6">
           <h2 className="text-lg font-bold text-white">New Trip</h2>
@@ -95,43 +130,99 @@ function CreateTripModal({ onClose, onCreated }) {
           </button>
         </div>
 
-        <form onSubmit={handleSubmit} className="space-y-4">
-          <div>
-            <label className="block text-xs font-medium text-atlas-text-secondary mb-1.5">Trip name *</label>
-            <input name="name" value={form.name} onChange={onChange} placeholder="e.g. Tokyo Adventure" className="atlas-input" autoFocus />
-          </div>
-          <div>
-            <label className="block text-xs font-medium text-atlas-text-secondary mb-1.5">Description</label>
-            <textarea name="description" value={form.description} onChange={onChange} placeholder="What's this trip about?" rows={2} className="atlas-input resize-none" />
-          </div>
-          <div className="grid grid-cols-2 gap-3">
+        {step === 1 ? (
+          <form onSubmit={handleStep1Submit} className="space-y-4">
             <div>
-              <label className="block text-xs font-medium text-atlas-text-secondary mb-1.5">Start date</label>
-              <input type="date" name="start_date" value={form.start_date} onChange={onChange} className="atlas-input" />
+              <label className="block text-xs font-medium text-atlas-text-secondary mb-1.5">Trip name *</label>
+              <input name="name" value={form.name} onChange={onChange} placeholder="e.g. Tokyo Adventure" className="atlas-input" autoFocus />
             </div>
             <div>
-              <label className="block text-xs font-medium text-atlas-text-secondary mb-1.5">End date</label>
-              <input type="date" name="end_date" value={form.end_date} onChange={onChange} className="atlas-input" />
+              <label className="block text-xs font-medium text-atlas-text-secondary mb-1.5">Description</label>
+              <textarea name="description" value={form.description} onChange={onChange} placeholder="What's this trip about?" rows={2} className="atlas-input resize-none" />
+            </div>
+            <div className="grid grid-cols-2 gap-3">
+              <div>
+                <label className="block text-xs font-medium text-atlas-text-secondary mb-1.5">Start date</label>
+                <input type="date" name="start_date" value={form.start_date} onChange={onChange} className="atlas-input" />
+              </div>
+              <div>
+                <label className="block text-xs font-medium text-atlas-text-secondary mb-1.5">End date</label>
+                <input type="date" name="end_date" value={form.end_date} onChange={onChange} className="atlas-input" />
+              </div>
+            </div>
+            <div>
+              <label className="block text-xs font-medium text-atlas-text-secondary mb-1.5">
+                Destinations <span className="text-atlas-text-muted">(comma-separated)</span>
+              </label>
+              <input name="destinations" value={form.destinations} onChange={onChange} placeholder="Tokyo, Kyoto, Osaka" className="atlas-input" />
+            </div>
+
+            {error && (
+              <p className="text-xs text-red-400 px-3 py-2 rounded-lg bg-red-500/10 border border-red-500/20">{error}</p>
+            )}
+
+            <div className="flex gap-3 pt-2">
+              <button type="button" onClick={onClose} className="btn-ghost flex-1">Cancel</button>
+              <button type="submit" className="btn-glow flex-1">Next</button>
+            </div>
+          </form>
+        ) : (
+          <div className="space-y-4">
+            <p className="text-sm text-atlas-text-secondary">How would you like to plan this trip?</p>
+            <div className="space-y-3">
+              <button
+                type="button"
+                onClick={() => createAndRedirect('blank')}
+                disabled={saving}
+                className="w-full p-4 rounded-xl border border-white/[0.08] hover:border-atlas-blue/40 hover:bg-atlas-blue/5 transition-all text-left flex items-start gap-3 group"
+              >
+                <div className="w-10 h-10 rounded-xl bg-white/[0.06] group-hover:bg-atlas-blue/20 flex items-center justify-center flex-shrink-0 text-lg">
+                  📝
+                </div>
+                <div>
+                  <p className="font-semibold text-white">Start blank</p>
+                  <p className="text-xs text-atlas-text-muted mt-0.5">Add an empty day and build your itinerary manually with search</p>
+                </div>
+              </button>
+              <button
+                type="button"
+                onClick={() => createAndRedirect('import')}
+                disabled={saving}
+                className="w-full p-4 rounded-xl border border-white/[0.08] hover:border-atlas-blue/40 hover:bg-atlas-blue/5 transition-all text-left flex items-start gap-3 group"
+              >
+                <div className="w-10 h-10 rounded-xl bg-white/[0.06] group-hover:bg-atlas-blue/20 flex items-center justify-center flex-shrink-0 text-lg">
+                  📤
+                </div>
+                <div>
+                  <p className="font-semibold text-white">Import from Google Maps</p>
+                  <p className="text-xs text-atlas-text-muted mt-0.5">Upload a KML/KMZ from Google My Maps</p>
+                </div>
+              </button>
+              <button
+                type="button"
+                onClick={() => createAndRedirect('ai')}
+                disabled={saving}
+                className="w-full p-4 rounded-xl border border-white/[0.08] hover:border-violet-500/40 hover:bg-violet-500/5 transition-all text-left flex items-start gap-3 group"
+              >
+                <div className="w-10 h-10 rounded-xl bg-white/[0.06] group-hover:bg-violet-500/20 flex items-center justify-center flex-shrink-0 text-lg">
+                  ✨
+                </div>
+                <div>
+                  <p className="font-semibold text-white">Generate with AI</p>
+                  <p className="text-xs text-atlas-text-muted mt-0.5">Let AI suggest an itinerary based on your preferences</p>
+                </div>
+              </button>
+            </div>
+
+            {error && (
+              <p className="text-xs text-red-400 px-3 py-2 rounded-lg bg-red-500/10 border border-red-500/20">{error}</p>
+            )}
+
+            <div className="flex gap-3 pt-2">
+              <button type="button" onClick={() => setStep(1)} className="btn-ghost flex-1">Back</button>
             </div>
           </div>
-          <div>
-            <label className="block text-xs font-medium text-atlas-text-secondary mb-1.5">
-              Destinations <span className="text-atlas-text-muted">(comma-separated)</span>
-            </label>
-            <input name="destinations" value={form.destinations} onChange={onChange} placeholder="Tokyo, Kyoto, Osaka" className="atlas-input" />
-          </div>
-
-          {error && (
-            <p className="text-xs text-red-400 px-3 py-2 rounded-lg bg-red-500/10 border border-red-500/20">{error}</p>
-          )}
-
-          <div className="flex gap-3 pt-2">
-            <button type="button" onClick={onClose} className="btn-ghost flex-1">Cancel</button>
-            <button type="submit" disabled={saving} className="btn-glow flex-1">
-              <span>{saving ? 'Creating…' : 'Create Trip'}</span>
-            </button>
-          </div>
-        </form>
+        )}
       </div>
     </div>
   );
@@ -213,18 +304,20 @@ export default function DashboardPage() {
   }, []);
 
   useEffect(() => {
-    supabase.auth.getUser().then(({ data: { user } }) => {
-      setUser(user);
-      loadTrips(user);
-    });
-
-    const { data: { subscription } } = supabase.auth.onAuthStateChange(
-      (_, session) => {
-        setUser(session?.user ?? null);
-        loadTrips(session?.user ?? null);
-      }
-    );
-    return () => subscription.unsubscribe();
+    let subscription;
+    try {
+      const { data } = supabase.auth.onAuthStateChange(
+        (_, session) => {
+          setUser(session?.user ?? null);
+          loadTrips(session?.user ?? null).catch(() => {});
+        }
+      );
+      subscription = data?.subscription;
+    } catch {
+      setUser(null);
+      loadTrips(null).catch(() => {});
+    }
+    return () => subscription?.unsubscribe?.();
   }, [loadTrips]);
 
   useEffect(() => {

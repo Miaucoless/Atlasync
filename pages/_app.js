@@ -14,8 +14,20 @@ import '../styles/globals.css';
 export default function App({ Component, pageProps }) {
   // Initialise offline cache & seed demo data on first load
   useEffect(() => {
-    initCache();
-    seedDemoData();
+    try {
+      initCache();
+      seedDemoData();
+    } catch {}
+  }, []);
+
+  // Prevent unhandled promise rejections from triggering Chrome dev reload loop
+  useEffect(() => {
+    const handle = (e) => {
+      console.warn('[Atlasync] Caught unhandled rejection:', e.reason);
+      e.preventDefault();
+    };
+    window.addEventListener('unhandledrejection', handle);
+    return () => window.removeEventListener('unhandledrejection', handle);
   }, []);
 
   // Pages can opt out of the Layout or customise it via static properties

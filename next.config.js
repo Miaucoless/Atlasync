@@ -1,6 +1,6 @@
 /** @type {import('next').NextConfig} */
 const nextConfig = {
-  reactStrictMode: true,
+  reactStrictMode: false,
 
   // Allow Mapbox GL to be imported correctly on the client
   webpack: (config, { isServer }) => {
@@ -24,12 +24,14 @@ const nextConfig = {
     ],
   },
 
-  // Security headers
+  // Security headers (Cache-Control in dev prevents refresh loop on some setups)
   async headers() {
+    const isDev = process.env.NODE_ENV === 'development';
     return [
       {
         source: '/(.*)',
         headers: [
+          ...(isDev ? [{ key: 'Cache-Control', value: 'no-cache, no-store, must-revalidate' }] : []),
           { key: 'X-Content-Type-Options', value: 'nosniff' },
           { key: 'X-Frame-Options',        value: 'DENY'    },
           { key: 'X-XSS-Protection',       value: '1; mode=block' },

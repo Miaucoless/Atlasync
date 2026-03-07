@@ -10,6 +10,7 @@
  */
 
 import { useEffect, useRef, useState, useCallback } from 'react';
+import { searchPlaces } from '../services/places';
 
 const MAPBOX_TOKEN = process.env.NEXT_PUBLIC_MAPBOX_TOKEN;
 
@@ -21,53 +22,58 @@ const TYPE_CONFIG = {
   activity:    { color: '#10B981', label: 'Activity'    },
 };
 
-function createMarkerEl(type, order, active = false, delay = 0) {
-  const cfg  = TYPE_CONFIG[type] || TYPE_CONFIG.attraction;
-  const size = active ? 44 : 36;
-  const el   = document.createElement('div');
+const STREET_ZOOM = 18;
 
-  // Start invisible, scale-in after delay
+function escapeHtml(s) {
+  if (!s) return '';
+  const div = document.createElement('div');
+  div.textContent = s;
+  return div.innerHTML;
+}
+
+/** Pin marker with name label above the pin (no numbers). */
+function createPinWithLabelEl(name, type, delay = 0) {
+  const cfg = TYPE_CONFIG[type] || TYPE_CONFIG.attraction;
+  const displayName = String(name || 'Place').slice(0, 28);
+  const el = document.createElement('div');
   el.style.cssText = `
-    width: ${size}px;
-    height: ${size}px;
-    border-radius: 50%;
-    background: ${cfg.color}22;
-    border: 2px solid ${cfg.color};
+    box-sizing: border-box;
     display: flex;
+    flex-direction: column;
     align-items: center;
-    justify-content: center;
-    font-size: 13px;
-    font-weight: 700;
-    color: ${cfg.color};
     cursor: pointer;
-    transition: transform 0.2s ease, box-shadow 0.2s ease;
-    box-shadow: 0 0 ${active ? '20px' : '10px'} ${cfg.color}55;
-    position: relative;
     transform: scale(0);
     opacity: 0;
+    transition: transform 0.2s ease, opacity 0.2s ease, filter 0.2s ease;
   `;
-
   el.innerHTML = `
-    <span style="position:relative;z-index:1;line-height:1;font-family:system-ui,sans-serif;">${order}</span>
-    ${active ? `<div style="position:absolute;inset:-6px;border-radius:50%;border:2px solid ${cfg.color};opacity:0.35;animation:marker-pulse 2s ease-in-out infinite;"></div>` : ''}
+    <span style="
+      font-family: system-ui, sans-serif;
+      font-size: 12px;
+      font-weight: 600;
+      color: #F1F5F9;
+      background: rgba(15,23,42,0.95);
+      padding: 3px 8px;
+      border-radius: 6px;
+      white-space: nowrap;
+      max-width: 160px;
+      overflow: hidden;
+      text-overflow: ellipsis;
+      border: 1px solid ${cfg.color}66;
+      box-shadow: 0 2px 8px rgba(0,0,0,0.35);
+      margin-bottom: 2px;
+    ">${escapeHtml(displayName)}</span>
+    <svg width="24" height="28" viewBox="0 0 24 28" fill="none" xmlns="http://www.w3.org/2000/svg" style="filter: drop-shadow(0 2px 4px rgba(0,0,0,0.3));">
+      <path d="M12 0C5.373 0 0 5.373 0 12c0 9 12 16 12 16s12-7 12-16C24 5.373 18.627 0 12 0z" fill="${cfg.color}"/>
+      <circle cx="12" cy="10" r="5" fill="white"/>
+    </svg>
   `;
-
-  // Animate entry
   setTimeout(() => {
     el.style.transform = 'scale(1)';
-    el.style.opacity   = '1';
-    el.style.transition = 'transform 0.4s cubic-bezier(0.34,1.56,0.64,1), opacity 0.3s ease, box-shadow 0.2s ease';
+    el.style.opacity = '1';
   }, delay);
-
-  el.addEventListener('mouseenter', () => {
-    el.style.transform  = 'scale(1.15)';
-    el.style.boxShadow  = `0 0 24px ${cfg.color}88`;
-  });
-  el.addEventListener('mouseleave', () => {
-    el.style.transform  = 'scale(1)';
-    el.style.boxShadow  = `0 0 ${active ? '20px' : '10px'} ${cfg.color}55`;
-  });
-
+  el.addEventListener('mouseenter', () => { el.style.filter = 'brightness(1.15)'; });
+  el.addEventListener('mouseleave', () => { el.style.filter = 'none'; });
   return el;
 }
 
@@ -87,8 +93,10 @@ export default function Map({
   const dashOffsetRef  = useRef(null);
   const [mapReady,    setMapReady]    = useState(false);
   const [error,       setError]       = useState(null);
-  const [detailLoc,   setDetailLoc]   = useState(null); // location detail panel
+  const [detailLoc,   setDetailLoc]   = useState(null);
   const [panelVisible, setPanelVisible] = useState(false);
+  const [locationDescription, setLocationDescription] = useState(null);
+  const [descriptionLoading, setDescriptionLoading] = useState(false);
 
   /* ── Initialise Mapbox ──────────────────────────────────────────── */
   useEffect(() => {
@@ -125,7 +133,6 @@ export default function Map({
       });
 
       map.addControl(new mapboxgl.NavigationControl({ showCompass: false }), 'bottom-right');
-      map.addControl(new mapboxgl.FullscreenControl(), 'bottom-right');
 
       mapRef.current = map;
     }).catch((err) => {
@@ -142,7 +149,7 @@ export default function Map({
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
-  /* ── Update markers with staggered entry ───────────────────────── */
+  /* ── Update markers (no activeId in deps so click does not recreate markers) ── */
   useEffect(() => {
     if (!mapReady || !mapRef.current) return;
 
@@ -153,39 +160,56 @@ export default function Map({
       locations.forEach((loc, idx) => {
         if (typeof loc.lat !== 'number' || typeof loc.lng !== 'number') return;
 
-        const isActive = loc.id === activeId;
-        const el       = createMarkerEl(loc.type, idx + 1, isActive, idx * 80);
-        const cfg      = TYPE_CONFIG[loc.type] || TYPE_CONFIG.attraction;
+        const el = createPinWithLabelEl(loc.name, loc.type, idx * 80);
 
-        const popup = new mapboxgl.Popup({
-          offset:      25,
-          closeButton: false,
-          className:   'atlas-popup',
-        }).setHTML(`
-          <div style="min-width:160px;">
-            <div style="font-weight:700;font-size:13px;color:#F8FAFC;margin-bottom:4px;">${loc.name}</div>
-            ${loc.address ? `<div style="font-size:11px;color:#94A3B8;margin-bottom:4px;">${loc.address}</div>` : ''}
-            <div style="font-size:10px;color:${cfg.color};text-transform:uppercase;letter-spacing:0.08em;font-weight:600;">
-              ${cfg.label}
-            </div>
-          </div>
-        `);
-
-        const marker = new mapboxgl.Marker({ element: el, anchor: 'center' })
+        const marker = new mapboxgl.Marker({ element: el, anchor: 'bottom' })
           .setLngLat([loc.lng, loc.lat])
-          .setPopup(popup)
           .addTo(mapRef.current);
 
         el.addEventListener('click', () => {
           onMarkerClick(loc);
           setDetailLoc(loc);
           setPanelVisible(true);
+          if (mapRef.current) {
+            mapRef.current.flyTo({
+              center: [loc.lng, loc.lat],
+              zoom: STREET_ZOOM,
+              duration: 800,
+              curve: 1.2,
+            });
+          }
         });
 
         markersRef.current.push(marker);
       });
     });
-  }, [locations, activeId, mapReady, onMarkerClick]);
+  }, [locations, mapReady, onMarkerClick]);
+
+  /* ── Fetch place description when detailLoc changes (avoid generic labels) ── */
+  useEffect(() => {
+    if (!detailLoc?.name || typeof detailLoc.lat !== 'number') {
+      setLocationDescription(null);
+      setDescriptionLoading(false);
+      return;
+    }
+    setDescriptionLoading(true);
+    setLocationDescription(null);
+    searchPlaces(detailLoc.name, detailLoc.lat, detailLoc.lng)
+      .then((results) => {
+        const first = results?.[0];
+        const desc = first?.description || first?.editorial_summary?.overview;
+        if (desc && typeof desc === 'string' && desc.trim().length > 20) {
+          const g = ['point of interest', 'establishment', 'point_of_interest', 'a place to visit', 'a popular place'];
+          const lower = desc.trim().toLowerCase();
+          const isGeneric = g.some((x) => lower === x || lower.startsWith(x + ' ') || lower.endsWith(' ' + x));
+          setLocationDescription(isGeneric ? null : desc.trim());
+        } else {
+          setLocationDescription(null);
+        }
+      })
+      .catch(() => setLocationDescription(null))
+      .finally(() => setDescriptionLoading(false));
+  }, [detailLoc?.id, detailLoc?.name, detailLoc?.lat, detailLoc?.lng]);
 
   /* ── Animated route draw ────────────────────────────────────────── */
   useEffect(() => {
@@ -287,7 +311,7 @@ export default function Map({
     return () => clearTimeout(t);
   }, [routeGeoJSON, mapReady]);
 
-  /* ── Fly to active marker ───────────────────────────────────────── */
+  /* ── Fly to active marker (street-level zoom) ───────────────────── */
   useEffect(() => {
     if (!mapReady || !mapRef.current || !activeId) return;
     const loc = locations.find((l) => l.id === activeId);
@@ -295,7 +319,7 @@ export default function Map({
 
     mapRef.current.flyTo({
       center:   [loc.lng, loc.lat],
-      zoom:     14,
+      zoom:     STREET_ZOOM,
       duration: 1200,
       curve:    1.4,
       easing:   (t) => t < 0.5 ? 2 * t * t : -1 + (4 - 2 * t) * t,
@@ -342,7 +366,7 @@ export default function Map({
         </div>
       )}
 
-      {/* ── Location detail panel ─────────────────────────────────── */}
+      {/* ── Location detail panel (single close button) ─────────────────────── */}
       {detailLoc && (
         <div
           className="absolute bottom-4 left-4 right-16 pointer-events-none"
@@ -356,7 +380,7 @@ export default function Map({
             className="glass-heavy rounded-xl px-4 py-3 flex items-start justify-between gap-3 pointer-events-auto shadow-card"
             style={{ borderLeft: `3px solid ${(TYPE_CONFIG[detailLoc.type] || TYPE_CONFIG.attraction).color}` }}
           >
-            <div className="min-w-0">
+            <div className="min-w-0 flex-1">
               <div className="flex items-center gap-2 mb-0.5">
                 <span
                   className="text-[10px] font-bold uppercase tracking-widest"
@@ -369,15 +393,36 @@ export default function Map({
               {detailLoc.address && (
                 <p className="text-atlas-text-muted text-xs mt-0.5 truncate">{detailLoc.address}</p>
               )}
-              {detailLoc.notes && (
+              {descriptionLoading && (
+                <p className="text-atlas-text-muted text-xs mt-1 italic">Loading description…</p>
+              )}
+              {!descriptionLoading && locationDescription && (
+                <p className="text-atlas-text-secondary text-xs mt-1 line-clamp-3">{locationDescription}</p>
+              )}
+              {!descriptionLoading && !locationDescription && detailLoc.notes && (
                 <p className="text-atlas-text-secondary text-xs mt-1 line-clamp-2">{detailLoc.notes}</p>
+              )}
+              {typeof detailLoc.lat === 'number' && typeof detailLoc.lng === 'number' && (
+                <a
+                  href={`https://www.google.com/maps?layer=c&cbll=${detailLoc.lat},${detailLoc.lng}`}
+                  target="_blank"
+                  rel="noopener noreferrer"
+                  className="inline-flex items-center gap-1.5 mt-2 text-xs font-medium text-atlas-blue hover:text-atlas-blue-light transition-colors"
+                >
+                  <svg className="w-3.5 h-3.5" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}>
+                    <path strokeLinecap="round" strokeLinejoin="round" d="M15 10l4.553-2.276A1 1 0 0121 8.618v6.764a1 1 0 01-1.447.894L15 14M5 18h8a2 2 0 002-2V8a2 2 0 00-2-2H5a2 2 0 00-2 2v8a2 2 0 002 2z" />
+                  </svg>
+                  Open in Street View
+                </a>
               )}
             </div>
             <button
-              onClick={() => setPanelVisible(false)}
-              className="flex-shrink-0 p-1 rounded-lg text-atlas-text-muted hover:text-white hover:bg-white/10 transition-all"
+              type="button"
+              onClick={() => { setPanelVisible(false); setDetailLoc(null); setLocationDescription(null); }}
+              className="flex-shrink-0 p-1.5 rounded-lg text-atlas-text-muted hover:text-white hover:bg-white/10 transition-all"
+              aria-label="Close"
             >
-              <svg className="w-3.5 h-3.5" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2.5}>
+              <svg className="w-4 h-4" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2.5}>
                 <line x1="18" y1="6" x2="6" y2="18" /><line x1="6" y1="6" x2="18" y2="18" />
               </svg>
             </button>

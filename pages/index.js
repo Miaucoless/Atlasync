@@ -16,20 +16,25 @@ import { useEffect, useRef, useState, useCallback } from 'react';
 import dynamic from 'next/dynamic';
 import Link from 'next/link';
 import Head from 'next/head';
+import CityPanel         from '../components/CityPanel';
+import AddToTripModal    from '../components/AddToTripModal';
+import GlobeErrorBoundary from '../components/GlobeErrorBoundary';
 
 const Globe = dynamic(() => import('../components/Globe'), { ssr: false });
 
+const DISABLE_GLOBE = process.env.NEXT_PUBLIC_DISABLE_GLOBE === '1';
+
 /* ── Data ──────────────────────────────────────────────────────── */
 const WORLD_MARKERS = [
-  { lat: 35.6762,  lng:  139.6503, label: 'Tokyo',       color: '#3B82F6' },
-  { lat: 48.8566,  lng:    2.3522, label: 'Paris',       color: '#8B5CF6' },
-  { lat: 40.7128,  lng:  -74.0060, label: 'New York',    color: '#06B6D4' },
-  { lat: -33.8688, lng:  151.2093, label: 'Sydney',      color: '#10B981' },
-  { lat: 51.5074,  lng:   -0.1278, label: 'London',      color: '#F59E0B' },
-  { lat:  1.3521,  lng:  103.8198, label: 'Singapore',   color: '#EC4899' },
-  { lat: 19.4326,  lng:  -99.1332, label: 'Mexico City', color: '#3B82F6' },
-  { lat: 55.7558,  lng:   37.6173, label: 'Moscow',      color: '#8B5CF6' },
-  { lat: -22.9068, lng:  -43.1729, label: 'Rio',         color: '#06B6D4' },
+  { lat: 35.6762,  lng:  139.6503, label: 'Tokyo',       country: 'Japan',     color: '#3B82F6' },
+  { lat: 48.8566,  lng:    2.3522, label: 'Paris',       country: 'France',    color: '#8B5CF6' },
+  { lat: 40.7128,  lng:  -74.0060, label: 'New York',    country: 'USA',       color: '#06B6D4' },
+  { lat: -33.8688, lng:  151.2093, label: 'Sydney',      country: 'Australia', color: '#10B981' },
+  { lat: 51.5074,  lng:   -0.1278, label: 'London',      country: 'UK',        color: '#F59E0B' },
+  { lat:  1.3521,  lng:  103.8198, label: 'Singapore',   country: 'Singapore', color: '#EC4899' },
+  { lat: 19.4326,  lng:  -99.1332, label: 'Mexico City', country: 'Mexico',    color: '#3B82F6' },
+  { lat: 55.7558,  lng:   37.6173, label: 'Moscow',      country: 'Russia',    color: '#8B5CF6' },
+  { lat: -22.9068, lng:  -43.1729, label: 'Rio',         country: 'Brazil',    color: '#06B6D4' },
 ];
 
 const WORLD_ARCS = [
@@ -112,14 +117,21 @@ function CountStat({ value, suffix, label, active }) {
 
 /* ── HomePage ───────────────────────────────────────────────────── */
 export default function HomePage() {
-  const [mounted,      setMounted]      = useState(false);
-  const [scrollY,      setScrollY]      = useState(0);
-  const [scrollPct,    setScrollPct]    = useState(0);
-  const [statsVisible, setStatsVisible] = useState(false);
-  const [hoveredCity,  setHoveredCity]  = useState(null);
+  const [mounted,        setMounted]        = useState(false);
+  const [scrollY,        setScrollY]        = useState(0);
+  const [scrollPct,      setScrollPct]      = useState(0);
+  const [statsVisible,   setStatsVisible]   = useState(false);
+  const [hoveredCity,    setHoveredCity]    = useState(null);
+  const [clickedCity,    setClickedCity]    = useState(null); // CityPanel
+  const [addLocation,    setAddLocation]    = useState(null); // AddToTripModal
 
   const statsRef = useRef(null);
   const { displayed: typedHeadline, done: typewriterDone } = useTypewriter('Plan your world', 60, 600);
+
+  const handleMarkerHover = useCallback((m) => setHoveredCity(m?.label ?? null), []);
+  const handleMarkerClick = useCallback((m) => {
+    if (m) setClickedCity({ name: m.label, country: m.country || '', lat: m.lat, lng: m.lng });
+  }, []);
 
   /* ── Mount + scroll tracking ─────────────────────────────────── */
   useEffect(() => {
@@ -174,17 +186,28 @@ export default function HomePage() {
       {/* ── Hero ─────────────────────────────────────────────────── */}
       <section className="relative min-h-screen flex flex-col items-center justify-center overflow-hidden">
 
-        {/* Globe — parallax shift on scroll */}
+        {/* Globe — disable with NEXT_PUBLIC_DISABLE_GLOBE=1 if refresh loop in regular mode */}
         <div
           className="absolute inset-0 z-0"
           style={{ transform: `translateY(${globeParallax}px)`, transition: 'transform 0.1s linear' }}
         >
-          {mounted && (
-            <Globe
-              markers={WORLD_MARKERS}
-              arcs={WORLD_ARCS}
-              autoSpin={true}
-              onMarkerHover={(m) => setHoveredCity(m?.label ?? null)}
+          {mounted && !DISABLE_GLOBE && (
+            <GlobeErrorBoundary>
+              <Globe
+                markers={WORLD_MARKERS}
+                arcs={WORLD_ARCS}
+                autoSpin={true}
+                onMarkerHover={handleMarkerHover}
+                onMarkerClick={handleMarkerClick}
+              />
+            </GlobeErrorBoundary>
+          )}
+          {mounted && DISABLE_GLOBE && (
+            <div
+              className="absolute inset-0 bg-gradient-to-b from-[#030b20] via-[#051230] to-[#030b20]"
+              style={{
+                background: 'radial-gradient(ellipse 80% 60% at 50% 40%, rgba(59,130,246,0.08) 0%, transparent 60%)',
+              }}
             />
           )}
           {/* Gradient vignette */}
@@ -252,6 +275,17 @@ export default function HomePage() {
           >
             No account required · Works offline · AI optional
           </p>
+        </div>
+
+        {/* Globe hint */}
+        <div
+          className="absolute top-24 left-1/2 -translate-x-1/2 z-10 pointer-events-none"
+          style={{ animation: 'atlas-fade-in 1s 3s both' }}
+        >
+          <div className="glass px-4 py-1.5 rounded-full text-xs text-atlas-text-muted border border-white/[0.07] flex items-center gap-2">
+            <span className="w-1.5 h-1.5 rounded-full bg-atlas-blue animate-pulse flex-shrink-0" />
+            Click any city to explore
+          </div>
         </div>
 
         {/* Scroll indicator */}
@@ -349,6 +383,24 @@ export default function HomePage() {
           </div>
         </div>
       </section>
+
+      {/* ── City Explore Panel (globe click) ──────────────────────── */}
+      {clickedCity && (
+        <CityPanel
+          city={clickedCity}
+          onClose={() => setClickedCity(null)}
+          onAddToTrip={(loc) => setAddLocation(loc)}
+        />
+      )}
+
+      {/* ── Add to Trip modal ─────────────────────────────────────── */}
+      {addLocation && (
+        <AddToTripModal
+          location={addLocation}
+          onClose={() => setAddLocation(null)}
+          onAdded={() => setAddLocation(null)}
+        />
+      )}
     </>
   );
 }

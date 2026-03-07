@@ -2,14 +2,12 @@
  * pages/api/ai/chat.js
  * POST /api/ai/chat
  *
- * Optional AI chat endpoint — proxies to Anthropic Claude.
- * The app works fully without this endpoint being called.
+ * Optional AI chat endpoint — uses DeepSeek (or Anthropic as fallback).
  *
  * Body:
  *   { messages: [{role, content}], systemContext?: string }
  *
- * Requires env var: ANTHROPIC_API_KEY
- * (Add to .env.local: ANTHROPIC_API_KEY=sk-ant-...)
+ * Requires env var: DEEPSEEK_API_KEY (or ANTHROPIC_API_KEY)
  */
 
 export default async function handler(req, res) {
@@ -17,10 +15,11 @@ export default async function handler(req, res) {
     return res.status(405).json({ error: 'Method not allowed.' });
   }
 
-  const apiKey = process.env.ANTHROPIC_API_KEY;
-  if (!apiKey) {
+  const deepseekKey = process.env.DEEPSEEK_API_KEY;
+  const anthropicKey = process.env.ANTHROPIC_API_KEY;
+  if (!deepseekKey && !anthropicKey) {
     return res.status(503).json({
-      error: 'AI features are not configured. Add ANTHROPIC_API_KEY to .env.local to enable them.',
+      error: 'AI features are not configured. Add DEEPSEEK_API_KEY or ANTHROPIC_API_KEY to .env.local.',
     });
   }
 
@@ -37,30 +36,61 @@ export default async function handler(req, res) {
   ].filter(Boolean).join('\n');
 
   try {
-    const response = await fetch('https://api.anthropic.com/v1/messages', {
-      method:  'POST',
-      headers: {
-        'Content-Type':      'application/json',
-        'x-api-key':         apiKey,
-        'anthropic-version': '2023-06-01',
-      },
-      body: JSON.stringify({
-        model:      'claude-haiku-4-5-20251001',
-        max_tokens: 600,
-        system,
-        messages:   messages.map(({ role, content }) => ({ role, content })),
-      }),
-    });
+    let content;
 
-    if (!response.ok) {
-      const body = await response.json().catch(() => ({}));
-      return res.status(response.status).json({
-        error: body.error?.message || `Anthropic API error ${response.status}`,
+    if (deepseekKey) {
+      const response = await fetch('https://api.deepseek.com/v1/chat/completions', {
+        method:  'POST',
+        headers: {
+          'Content-Type':  'application/json',
+          'Authorization': `Bearer ${deepseekKey}`,
+        },
+        body: JSON.stringify({
+          model:    'deepseek-chat',
+          max_tokens: 600,
+          messages: [
+            { role: 'system', content: system },
+            ...messages.map(({ role, content }) => ({ role, content })),
+          ],
+        }),
       });
+
+      if (!response.ok) {
+        const body = await response.json().catch(() => ({}));
+        return res.status(response.status).json({
+          error: body.error?.message || `DeepSeek API error ${response.status}`,
+        });
+      }
+
+      const data = await response.json();
+      content = data.choices?.[0]?.message?.content ?? '';
+    } else {
+      const response = await fetch('https://api.anthropic.com/v1/messages', {
+        method:  'POST',
+        headers: {
+          'Content-Type':      'application/json',
+          'x-api-key':         anthropicKey,
+          'anthropic-version': '2023-06-01',
+        },
+        body: JSON.stringify({
+          model:    'claude-haiku-4-5-20251001',
+          max_tokens: 600,
+          system,
+          messages: messages.map(({ role, content }) => ({ role, content })),
+        }),
+      });
+
+      if (!response.ok) {
+        const body = await response.json().catch(() => ({}));
+        return res.status(response.status).json({
+          error: body.error?.message || `Anthropic API error ${response.status}`,
+        });
+      }
+
+      const data = await response.json();
+      content = data.content?.[0]?.text ?? '';
     }
 
-    const data = await response.json();
-    const content = data.content?.[0]?.text ?? '';
     return res.status(200).json({ content });
 
   } catch (err) {

@@ -10,7 +10,7 @@
  *  ✦ Header actions — icon-only on mobile, text+icon on desktop
  */
 
-import { useState, useEffect, useCallback, useMemo } from 'react';
+import { useState, useEffect, useCallback, useMemo, useRef } from 'react';
 import Head from 'next/head';
 import { useRouter } from 'next/router';
 import dynamic from 'next/dynamic';
@@ -18,7 +18,7 @@ import Link from 'next/link';
 import TripDayCard from '../../components/TripDayCard';
 import AIChat      from '../../components/AIChat';
 import {
-  supabase, fetchTrip, updateTrip, deleteTrip, upsertLocations, deleteLocation,
+  supabase, fetchTrip, updateTrip, deleteTrip, upsertLocations, deleteLocation, insertTripDays,
 } from '../../utils/supabaseClient';
 import {
   optimizeRoute, routeToGeoJSON,
@@ -79,8 +79,9 @@ function parseGoogleMapsUrl(raw) {
 }
 
 /* ── Add location modal ─────────────────────────────────────────────── */
-function AddLocationModal({ tripId, dayId, onClose, onAdded }) {
+function AddLocationModal({ tripId, dayId, days = [], onClose, onAdded }) {
   const [tab,  setTab]  = useState('manual'); // 'manual' | 'import'
+  const [selectedDayId, setSelectedDayId] = useState(dayId || days[0]?.id);
   const [mapsUrl, setMapsUrl] = useState('');
   const [parseError, setParseError] = useState(null);
 
@@ -90,6 +91,10 @@ function AddLocationModal({ tripId, dayId, onClose, onAdded }) {
   });
   const [saving, setSaving] = useState(false);
   const [error,  setError]  = useState(null);
+
+  useEffect(() => {
+    setSelectedDayId(dayId || days[0]?.id);
+  }, [dayId, days]);
 
   function onChange(e) {
     setForm((f) => ({ ...f, [e.target.name]: e.target.value }));
@@ -120,7 +125,7 @@ function AddLocationModal({ tripId, dayId, onClose, onAdded }) {
     const loc = {
       id:               `local-${Date.now()}`,
       trip_id:          tripId,
-      day_id:           dayId,
+      day_id:           selectedDayId,
       name:             form.name.trim(),
       type:             form.type,
       address:          form.address.trim() || null,
@@ -158,6 +163,22 @@ function AddLocationModal({ tripId, dayId, onClose, onAdded }) {
             <XIcon />
           </button>
         </div>
+
+        {/* Day selector */}
+        {days.length > 0 && (
+          <div className="mb-4">
+            <label className="block text-xs font-medium text-atlas-text-muted mb-1.5">Add to</label>
+            <select
+              value={selectedDayId ?? ''}
+              onChange={(e) => setSelectedDayId(e.target.value)}
+              className="atlas-input w-full text-sm"
+            >
+              {days.map((d) => (
+                <option key={d.id} value={d.id}>Day {d.day_number ?? '?'}{d.title && d.title !== `Day ${d.day_number}` ? ` — ${d.title}` : ''}</option>
+              ))}
+            </select>
+          </div>
+        )}
 
         {/* Tab switcher */}
         <div className="flex gap-1 mb-4 p-1 rounded-xl bg-white/[0.04] border border-white/[0.06]">
@@ -271,6 +292,7 @@ export default function TripDetailPage() {
   const [offlineMode,    setOfflineMode]    = useState(false);
   const [editing,        setEditing]        = useState(false);
   const [editName,       setEditName]       = useState('');
+  const [showItineraryGen, setShowItineraryGen] = useState(false);
 
   /* Load trip */
   const loadTrip = useCallback(async () => {
@@ -287,9 +309,7 @@ export default function TripDetailPage() {
       if (data) {
         setTrip(data);
         setEditName(data.name);
-        const expanded = {};
-        data.trip_days?.forEach((d) => { expanded[d.id] = true; });
-        setExpandedDays(expanded);
+        setExpandedDays({});
       }
     } catch {
       const cached = getCachedTrip(id);
@@ -301,12 +321,33 @@ export default function TripDetailPage() {
 
   useEffect(() => { loadTrip(); }, [loadTrip]);
 
+  /* When landing with ?generate=1, open the AI itinerary modal */
+  useEffect(() => {
+    if (!trip || !router.isReady) return;
+    if (router.query.generate === '1') {
+      setShowItineraryGen(true);
+      router.replace(`/trips/${id}`, undefined, { shallow: true });
+    }
+  }, [trip, router.isReady, router.query.generate, id, router]);
+
   const allLocations = useMemo(() => {
     if (!trip) return [];
     return (trip.trip_days ?? [])
-      .flatMap((d) => d.trip_locations ?? [])
+      .flatMap((d) => (d.trip_locations ?? []).map((l) => ({ ...l, _day_number: d.day_number })))
       .filter((l) => typeof l.lat === 'number');
   }, [trip]);
+
+  const daysSorted = useMemo(
+    () => (trip?.trip_days ?? []).slice().sort((a, b) => (a.day_number ?? 0) - (b.day_number ?? 0)),
+    [trip?.trip_days]
+  );
+
+  const [mapDayFilter, setMapDayFilter] = useState(null);
+  useEffect(() => {
+    if (daysSorted.length > 0 && mapDayFilter == null) {
+      setMapDayFilter(daysSorted[0].day_number ?? null);
+    }
+  }, [daysSorted, mapDayFilter]);
 
   /* Optimise with animated progress */
   async function handleOptimise() {
@@ -341,8 +382,22 @@ export default function TripDetailPage() {
     setRouteGeoJSON(null);
   }
 
+  const dayCardRefs = useRef({});
+
   function toggleDay(dayId) {
-    setExpandedDays((e) => ({ ...e, [dayId]: !e[dayId] }));
+    setExpandedDays((prev) => {
+      const isOpening = !prev[dayId];
+      const next = isOpening ? { [dayId]: true } : { ...prev, [dayId]: false };
+      if (isOpening) {
+        const day = (trip?.trip_days ?? []).find((d) => d.id === dayId);
+        if (day != null) setMapDayFilter(day.day_number ?? null);
+        setTimeout(() => {
+          const el = dayCardRefs.current[dayId];
+          if (el) el.scrollIntoView({ behavior: 'smooth', block: 'nearest' });
+        }, 80);
+      }
+      return next;
+    });
   }
 
   function handleAddLocation(day) {
@@ -400,7 +455,11 @@ export default function TripDetailPage() {
     } catch (e) { console.error(e); }
   }
 
-  const mapLocations = optimisedRoute?.locations ?? allLocations;
+  const mapLocations = useMemo(() => {
+    if (mapDayFilter == null) return [];
+    const base = optimisedRoute?.locations ?? allLocations;
+    return base.filter((l) => (l._day_number ?? l.day_number) === mapDayFilter);
+  }, [mapDayFilter, optimisedRoute?.locations, allLocations]);
 
   /* ── Loading ──────────────────────────────────────────────────── */
   if (loading) {
@@ -577,17 +636,15 @@ export default function TripDetailPage() {
                   <p className="text-atlas-text-muted text-sm">Add days via the API or import from Google Maps.</p>
                 </div>
               ) : (
-                days
-                  .slice()
-                  .sort((a, b) => (a.day_number ?? 0) - (b.day_number ?? 0))
-                  .map((day, i) => (
+                daysSorted.map((day, i) => (
                     <div
                       key={day.id}
+                      ref={(el) => { dayCardRefs.current[day.id] = el; }}
                       style={{ animation: `slide-up 0.4s ${i * 80}ms both` }}
                     >
                       <TripDayCard
                         day={day}
-                        isExpanded={expandedDays[day.id] !== false}
+                        isExpanded={expandedDays[day.id] === true}
                         onToggle={toggleDay}
                         onLocationClick={(loc) => setActiveLocId(loc.id === activeLocId ? null : loc.id)}
                         onDeleteLocation={handleDeleteLocation}
@@ -601,11 +658,40 @@ export default function TripDetailPage() {
 
             {/* ── Right: Map ──────────────────────────────────── */}
             <div className="relative flex-1 min-h-[500px] lg:min-h-0 lg:h-[calc(100vh-160px)] lg:sticky lg:top-[130px]">
+              {daysSorted.length > 0 && (
+                <div className="absolute top-4 left-4 right-4 z-10 flex flex-wrap gap-1.5">
+                  {daysSorted.map((d) => (
+                    <button
+                      key={d.id}
+                      type="button"
+                      onClick={() => {
+                        setMapDayFilter(d.day_number ?? null);
+                        setExpandedDays({ [d.id]: true });
+                        setTimeout(() => {
+                          const el = dayCardRefs.current[d.id];
+                          if (el) el.scrollIntoView({ behavior: 'smooth', block: 'nearest' });
+                        }, 80);
+                      }}
+                      className={`px-2.5 py-1.5 rounded-lg text-xs font-medium transition-all ${
+                        mapDayFilter === (d.day_number ?? null)
+                          ? 'bg-atlas-blue/90 text-white shadow-md'
+                          : 'glass text-atlas-text-secondary hover:text-white hover:bg-white/10'
+                      }`}
+                    >
+                      Day {d.day_number ?? '?'}
+                    </button>
+                  ))}
+                </div>
+              )}
               <Map
                 locations={mapLocations}
                 routeGeoJSON={routeGeoJSON}
                 activeId={activeLocId}
-                onMarkerClick={(loc) => setActiveLocId(loc.id === activeLocId ? null : loc.id)}
+                onMarkerClick={(loc) => {
+                  setActiveLocId(loc.id === activeLocId ? null : loc.id);
+                  const dayNum = loc._day_number ?? loc.day_number;
+                  if (dayNum != null) setMapDayFilter(dayNum);
+                }}
                 className="w-full h-full"
                 initialCenter={
                   allLocations[0]
@@ -639,12 +725,12 @@ export default function TripDetailPage() {
         )}
 
         {/* ── Mobile FAB — Add Stop ─────────────────────────────── */}
-        {days.length > 0 && (
+        {daysSorted.length > 0 && (
           <div className="fixed bottom-6 left-1/2 -translate-x-1/2 z-40 lg:hidden">
             <button
               onClick={() => {
-                const sortedDays = [...days].sort((a, b) => (a.day_number ?? 0) - (b.day_number ?? 0));
-                if (sortedDays.length > 0) handleAddLocation(sortedDays[0]);
+                const day = daysSorted.find((d) => (d.day_number ?? null) === mapDayFilter) || daysSorted[0];
+                handleAddLocation(day);
               }}
               className="btn-glow px-6 py-3 shadow-glow text-sm flex items-center gap-2"
               style={{ animation: 'slide-in-bottom 0.4s 200ms cubic-bezier(0.34,1.56,0.64,1) both' }}
@@ -659,10 +745,11 @@ export default function TripDetailPage() {
       </div>
 
       {/* Add location modal */}
-      {showAddModal && addingToDay && (
+      {showAddModal && daysSorted.length > 0 && (
         <AddLocationModal
           tripId={trip.id}
-          dayId={addingToDay.id}
+          dayId={addingToDay?.id ?? (daysSorted.find((d) => (d.day_number ?? null) === mapDayFilter) || daysSorted[0])?.id}
+          days={daysSorted}
           onClose={() => { setShowAddModal(false); setAddingToDay(null); }}
           onAdded={handleLocationAdded}
         />

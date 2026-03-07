@@ -43,6 +43,7 @@ export default function Globe({
   arcs          = [],    // [{ from: {lat,lng}, to: {lat,lng}, color? }]
   autoSpin      = true,
   onMarkerHover = null,  // (marker | null) => void
+  onMarkerClick = null,  // (marker) => void — fires on click (not drag)
   className     = '',
 }) {
   const mountRef = useRef(null);
@@ -50,8 +51,9 @@ export default function Globe({
   /* All mutable animation state in a single ref — avoids stale closures
      while keeping React renders minimal */
   const st = useRef({
-    isDragging: false,
-    prevMouse:  { x: 0, y: 0 },
+    isDragging:   false,
+    prevMouse:    { x: 0, y: 0 },
+    dragStartPos: { x: 0, y: 0 }, // track start position for click vs drag
     rotX: 0.35, rotY: 0,
     targetRotX: 0.35, targetRotY: 0,
     velX: 0, velY: 0,   // inertia
@@ -310,11 +312,25 @@ export default function Globe({
 
     function onPointerDown(e) {
       const { x, y } = getXY(e);
-      s.isDragging = true;
-      s.prevMouse  = { x, y };
+      s.isDragging   = true;
+      s.prevMouse    = { x, y };
+      s.dragStartPos = { x, y };   // remember where the drag started
       s.velX = s.velY = 0;
     }
-    function onPointerUp() { s.isDragging = false; }
+
+    function onPointerUp(e) {
+      s.isDragging = false;
+
+      /* Click detection: if pointer barely moved, treat as a click */
+      if (onMarkerClick) {
+        const { x, y } = getXY(e);
+        const dx = Math.abs(x - s.dragStartPos.x);
+        const dy = Math.abs(y - s.dragStartPos.y);
+        if (dx < 6 && dy < 6 && lastHoveredIdx >= 0 && markers[lastHoveredIdx]) {
+          onMarkerClick(markers[lastHoveredIdx]);
+        }
+      }
+    }
 
     function onPointerMove(e) {
       const { x, y } = getXY(e);
@@ -446,13 +462,32 @@ export default function Globe({
       renderer.dispose();
       if (mount.contains(renderer.domElement)) mount.removeChild(renderer.domElement);
     };
-  }, [markers, arcs, autoSpin, onMarkerHover]);
+  }, [markers, arcs, autoSpin, onMarkerHover, onMarkerClick]);
+
+  const [globeError, setGlobeError] = useState(false);
 
   useEffect(() => {
     let cleanup;
-    initGlobe().then((fn) => { cleanup = fn; });
+    initGlobe()
+      .then((fn) => { cleanup = fn; })
+      .catch((err) => {
+        console.warn('[Atlasync] Globe init failed:', err?.message);
+        setGlobeError(true);
+      });
     return () => { if (typeof cleanup === 'function') cleanup(); };
   }, [initGlobe]);
+
+  if (globeError) {
+    return (
+      <div
+        className={`w-full h-full ${className}`}
+        style={{
+          background: 'radial-gradient(ellipse 80% 60% at 50% 40%, rgba(59,130,246,0.08) 0%, transparent 60%)',
+          backgroundColor: '#030b20',
+        }}
+      />
+    );
+  }
 
   return (
     <div

@@ -5,7 +5,15 @@
  */
 
 import { useEffect, useRef } from 'react';
-import Navbar from './Navbar';
+import dynamic from 'next/dynamic';
+
+// Lazy-load Navbar to defer Supabase auth (avoids refresh loop in regular browser mode)
+const Navbar = dynamic(() => import('./Navbar'), {
+  ssr: false,
+  loading: () => (
+    <header className="fixed top-0 left-0 right-0 z-50 h-14 border-b border-atlas-border/50 bg-atlas-bg/80 backdrop-blur-xl" />
+  ),
+});
 
 export default function Layout({ children, hideNav = false, fullBleed = false }) {
   const canvasRef = useRef(null);
@@ -15,6 +23,7 @@ export default function Layout({ children, hideNav = false, fullBleed = false })
     const canvas = canvasRef.current;
     if (!canvas) return;
     const ctx = canvas.getContext('2d');
+    if (!ctx) return;
 
     function resize() {
       canvas.width  = window.innerWidth;

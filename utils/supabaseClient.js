@@ -2,58 +2,10 @@
  * supabaseClient.js
  * Single shared Supabase client for the entire app.
  *
- * Required Supabase tables (run these in your Supabase SQL editor):
- *
- * -- Enable UUID extension
- * CREATE EXTENSION IF NOT EXISTS "pgcrypto";
- *
- * -- Trips
- * CREATE TABLE trips (
- *   id           UUID DEFAULT gen_random_uuid() PRIMARY KEY,
- *   user_id      UUID REFERENCES auth.users(id) ON DELETE CASCADE,
- *   name         TEXT NOT NULL,
- *   description  TEXT,
- *   cover_image  TEXT,
- *   start_date   DATE,
- *   end_date     DATE,
- *   destinations JSONB DEFAULT '[]',
- *   created_at   TIMESTAMPTZ DEFAULT NOW(),
- *   updated_at   TIMESTAMPTZ DEFAULT NOW()
- * );
- *
- * -- Trip days
- * CREATE TABLE trip_days (
- *   id         UUID DEFAULT gen_random_uuid() PRIMARY KEY,
- *   trip_id    UUID REFERENCES trips(id) ON DELETE CASCADE,
- *   day_number INTEGER NOT NULL,
- *   date       DATE,
- *   title      TEXT,
- *   notes      TEXT
- * );
- *
- * -- Trip locations (points of interest, restaurants, hotels)
- * CREATE TABLE trip_locations (
- *   id               UUID DEFAULT gen_random_uuid() PRIMARY KEY,
- *   trip_id          UUID REFERENCES trips(id) ON DELETE CASCADE,
- *   day_id           UUID REFERENCES trip_days(id) ON DELETE SET NULL,
- *   name             TEXT NOT NULL,
- *   type             TEXT DEFAULT 'attraction',
- *   lat              DOUBLE PRECISION,
- *   lng              DOUBLE PRECISION,
- *   address          TEXT,
- *   notes            TEXT,
- *   visit_order      INTEGER DEFAULT 0,
- *   duration_minutes INTEGER DEFAULT 60
- * );
- *
- * -- Row-level security (optional but recommended)
- * ALTER TABLE trips         ENABLE ROW LEVEL SECURITY;
- * ALTER TABLE trip_days     ENABLE ROW LEVEL SECURITY;
- * ALTER TABLE trip_locations ENABLE ROW LEVEL SECURITY;
- *
- * CREATE POLICY "Users own trips"    ON trips          FOR ALL USING (auth.uid() = user_id);
- * CREATE POLICY "Trip days via trip" ON trip_days      FOR ALL USING (trip_id IN (SELECT id FROM trips WHERE user_id = auth.uid()));
- * CREATE POLICY "Locs via trip"      ON trip_locations FOR ALL USING (trip_id IN (SELECT id FROM trips WHERE user_id = auth.uid()));
+ * Schema: run migrations in order so trip_days exists before trip_locations (foreign key).
+ *   supabase/migrations/001_trips_and_trip_days.sql  — trips, trip_days
+ *   supabase/migrations/002_trip_locations.sql       — trip_locations (references trip_days)
+ * In Supabase Dashboard → SQL Editor, run 001 first, then 002.
  */
 
 import { createClient } from '@supabase/supabase-js';
@@ -100,10 +52,38 @@ export async function signOut() {
   if (error) throw error;
 }
 
-/** Get the currently authenticated user (null if not logged in) */
+/** Get the currently authenticated user (null if not logged in or on error) */
 export async function getCurrentUser() {
-  const { data: { user } } = await supabase.auth.getUser();
-  return user;
+  try {
+    const { data: { user } } = await supabase.auth.getUser();
+    return user;
+  } catch {
+    return null;
+  }
+}
+
+/** Update profile picture URL (stored in user_metadata.avatar_url) */
+export async function updateProfilePicture(avatarUrl) {
+  const { data, error } = await supabase.auth.updateUser({
+    data: { avatar_url: avatarUrl || null },
+  });
+  if (error) throw error;
+  return data.user;
+}
+
+/**
+ * Upload avatar to Supabase Storage. Returns public URL.
+ * Create bucket "avatars" in Supabase Dashboard → Storage, set to Public.
+ */
+export async function uploadAvatar(userId, file) {
+  const ext = file.name.split('.').pop()?.toLowerCase() || 'jpg';
+  const path = `${userId}/avatar.${ext}`;
+  const { data, error } = await supabase.storage
+    .from('avatars')
+    .upload(path, file, { upsert: true, contentType: file.type });
+  if (error) throw error;
+  const { data: { publicUrl } } = supabase.storage.from('avatars').getPublicUrl(data.path);
+  return publicUrl;
 }
 
 /* ── Trip CRUD helpers ────────────────────────────────────────────────── */
@@ -160,6 +140,23 @@ export async function deleteTrip(tripId) {
     .delete()
     .eq('id', tripId);
   if (error) throw error;
+}
+
+/** Insert trip days and return the created rows with IDs */
+export async function insertTripDays(tripId, days) {
+  const rows = days.map((d) => ({
+    trip_id: tripId,
+    day_number: d.day_number,
+    date: d.date ?? null,
+    title: d.title ?? null,
+    notes: d.notes ?? null,
+  }));
+  const { data, error } = await supabase
+    .from('trip_days')
+    .insert(rows)
+    .select();
+  if (error) throw error;
+  return data;
 }
 
 /* ── Location helpers ────────────────────────────────────────────────── */

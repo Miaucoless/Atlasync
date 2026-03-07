@@ -230,6 +230,21 @@ body {
     top:      8px !important;
   }
 
+  /* Fullscreen: map container must fill viewport so Mapbox fullscreen works */
+  .atlas-map-container:fullscreen,
+  .atlas-map-container:-webkit-full-screen,
+  .atlas-map-container:-moz-full-screen {
+    width:  100vw !important;
+    height: 100vh !important;
+  }
+  .atlas-map-container:fullscreen .mapboxgl-canvas-container,
+  .atlas-map-container:fullscreen .mapboxgl-canvas,
+  .atlas-map-container:-webkit-full-screen .mapboxgl-canvas-container,
+  .atlas-map-container:-webkit-full-screen .mapboxgl-canvas {
+    width:  100% !important;
+    height: 100% !important;
+  }
+
   /* ── Map marker base ────────────────────────────────────── */
   .map-marker {
     display:         flex;
@@ -242,6 +257,29 @@ body {
   }
   .map-marker:hover { transform: scale(1.28) translateY(-3px); }
   .map-marker.active { transform: scale(1.4); }
+
+  /* Map popups: readable text and contrast */
+  .mapboxgl-popup.atlas-popup .mapboxgl-popup-content {
+    padding:        14px 16px;
+    background:      rgba(15, 23, 42, 0.97);
+    border:          1px solid rgba(148, 163, 184, 0.2);
+    border-radius:   12px;
+    box-shadow:      0 10px 40px rgba(0, 0, 0, 0.4);
+    min-width:      180px;
+    max-width:       320px;
+  }
+  .mapboxgl-popup.atlas-popup .atlas-popup-name,
+  .mapboxgl-popup.atlas-popup [style*="font-weight:700"] {
+    font-size:   16px !important;
+    line-height: 1.35 !important;
+    color:       #F1F5F9 !important;
+  }
+  .mapboxgl-popup.atlas-popup .atlas-popup-desc,
+  .mapboxgl-popup.atlas-popup [style*="font-size:11px"],
+  .mapboxgl-popup.atlas-popup [style*="font-size:12px"] {
+    font-size:   13px !important;
+    color:       #94A3B8 !important;
+  }
 }
 
 /* ══════════════════════════════════════════════════════════════════
