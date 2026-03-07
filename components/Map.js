@@ -11,6 +11,7 @@
 
 import { useEffect, useLayoutEffect, useRef, useState, useCallback } from 'react';
 import { searchPlaces, getPlaceDetailsByLocation } from '../services/places';
+import { debounce, changedKey } from '../lib/async-guards';
 
 const MAPBOX_TOKEN = process.env.NEXT_PUBLIC_MAPBOX_TOKEN;
 
@@ -400,8 +401,10 @@ export default function Map({
     const bounds = map.getBounds();
     const bbox = bounds ? [bounds.getWest(), bounds.getSouth(), bounds.getEast(), bounds.getNorth()] : null;
 
+    const heatmapKeyRef = { current: '' };
     const updateHeatmapData = (b) => {
       if (!map.getSource(heatmapSourceId)) return;
+      if (!changedKey(heatmapKeyRef, { b, f: heatmapFilters })) return;
       fetchPoisInBounds(b, heatmapFilters).then((geo) => {
         if (!mapRef.current || !map.getSource(heatmapSourceId)) return;
         map.getSource(heatmapSourceId).setData(geo);
@@ -438,11 +441,11 @@ export default function Map({
         },
         map.getStyle().layers?.find((l) => l.id === 'building') ? 'building' : undefined
       );
-      const onMoveEnd = () => {
+      const onMoveEnd = debounce(() => {
         if (!mapRef.current || !map.getSource(heatmapSourceId)) return;
         const b = map.getBounds();
         updateHeatmapData([b.getWest(), b.getSouth(), b.getEast(), b.getNorth()]);
-      };
+      }, 350);
       heatmapMoveEndRef.current = onMoveEnd;
       map.on('moveend', onMoveEnd);
     });

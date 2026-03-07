@@ -691,7 +691,11 @@ export default function TripDetailPage() {
       setShowItineraryGen(true);
       router.replace(`/trips/${id}`, undefined, { shallow: true });
     }
-  }, [trip, router.isReady, router.query.generate, id, router]);
+    // `router` object intentionally omitted: it changes reference after
+    // router.replace(), which would re-trigger this effect unnecessarily.
+    // The primitive deps (router.isReady, router.query.generate) are sufficient.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [trip, router.isReady, router.query.generate, id]);
 
   const allLocations = useMemo(() => {
     if (!trip) return [];
@@ -707,11 +711,15 @@ export default function TripDetailPage() {
 
   const [mapDayFilter, setMapDayFilter] = useState(null);
   const [categoryChips, setCategoryChips] = useState([]);
+  // Guard: only auto-select the first day once (prevents re-running when mapDayFilter
+  // itself changes, which would be a set-state-inside-effect-that-depends-on-state loop).
+  const mapDayInitRef = useRef(false);
   useEffect(() => {
-    if (daysSorted.length > 0 && mapDayFilter == null) {
+    if (!mapDayInitRef.current && daysSorted.length > 0) {
+      mapDayInitRef.current = true;
       setMapDayFilter(daysSorted[0].day_number ?? null);
     }
-  }, [daysSorted, mapDayFilter]);
+  }, [daysSorted]);
 
   const CATEGORY_CHIPS = [
     { key: 'food',        label: '🍽 Food',        types: ['restaurant'] },
@@ -881,6 +889,11 @@ export default function TripDetailPage() {
     setShowItineraryGen(false);
   }
 
+  // Keep a ref to the latest trip so memoized callbacks can read current data
+  // without being re-created (and forcing Map effects to re-run) on every trip update.
+  const tripRef = useRef(trip);
+  useEffect(() => { tripRef.current = trip; }, [trip]);
+
   const dayCardRefs = useRef({});
 
   function toggleDay(dayId) {
@@ -904,7 +917,7 @@ export default function TripDetailPage() {
     setShowAddModal(true);
   }
 
-  function handleLocationAdded(newLoc) {
+  const handleLocationAdded = useCallback((newLoc) => {
     setTrip((prev) => {
       if (!prev) return prev;
       const updated = {
@@ -918,16 +931,17 @@ export default function TripDetailPage() {
       cacheTrip(updated); // cache inside updater so we use the freshly-built value
       return updated;
     });
-  }
+  }, []);
 
-  async function handleAddLocationFromMap(dayId, location) {
-    if (!trip?.id) return;
-    const day = (trip.trip_days ?? []).find((d) => d.id === dayId);
+  const handleAddLocationFromMap = useCallback(async (dayId, location) => {
+    const currentTrip = tripRef.current;
+    if (!currentTrip?.id) return;
+    const day = (currentTrip.trip_days ?? []).find((d) => d.id === dayId);
     if (!day) return;
     const visit_order = (day.trip_locations ?? []).length;
     const notes = [location.notes, location.description].filter(Boolean).join('\n\n') || null;
     const payload = {
-      trip_id: trip.id,
+      trip_id: currentTrip.id,
       day_id: dayId,
       name: location.name || 'Place',
       type: location.type || 'attraction',
@@ -949,7 +963,15 @@ export default function TripDetailPage() {
     } catch (e) {
       console.error(e);
     }
-  }
+  }, [handleLocationAdded]);
+
+  const handleMarkerClick = useCallback((loc) => {
+    setActiveLocId((prev) => (loc.id === prev ? null : loc.id));
+    const dayNum = loc._day_number ?? loc.day_number;
+    if (dayNum != null) setMapDayFilter(dayNum);
+  }, []);
+
+  const handleMapClick = useCallback(() => setActiveLocId(null), []);
 
   async function handleDeleteLocation(locId) {
     try {
@@ -1290,12 +1312,8 @@ export default function TripDetailPage() {
                 routeGeoJSON={routeGeoJSON}
                 dayRouteGeoJSON={dayRouteGeoJSON}
                 activeId={activeLocId}
-                onMarkerClick={(loc) => {
-                  setActiveLocId(loc.id === activeLocId ? null : loc.id);
-                  const dayNum = loc._day_number ?? loc.day_number;
-                  if (dayNum != null) setMapDayFilter(dayNum);
-                }}
-                onMapClick={() => setActiveLocId(null)}
+                onMarkerClick={handleMarkerClick}
+                onMapClick={handleMapClick}
                 days={daysSorted}
                 onAddLocationToDay={handleAddLocationFromMap}
                 activeCategoryFilters={activeCategoryFilters}

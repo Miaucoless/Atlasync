@@ -594,11 +594,18 @@ export default function CityPanel({ city, onClose, onAddToTrip }) {
   const [livePOIs,    setLivePOIs]    = useState({}); // { [tab]: items[] }
   const [poisLoading, setPOIsLoading] = useState({}); // { [tab]: bool }
   const abortRef = useRef({});
+  const fetchedTabsRef = useRef(new Set());
 
   const data     = CITY_DATA[city?.name] || getFallbackData(city?.name || 'This City');
   const photoUrl = data.photo && !imgError
     ? `https://images.unsplash.com/${data.photo}?w=1400&q=85&fit=crop&auto=format`
     : null;
+
+  /* Reset fetched-tab tracking when city changes */
+  useEffect(() => {
+    fetchedTabsRef.current.clear();
+    setLivePOIs({});
+  }, [city?.name]);
 
   /* Fetch weather when city changes */
   useEffect(() => {
@@ -616,7 +623,8 @@ export default function CityPanel({ city, onClose, onAddToTrip }) {
     if (!city?.name || !city?.lat || !city?.lng) return;
     const tabCfg = TAB_QUERIES[activeTab];
     if (!tabCfg) return;                    // neighbourhoods — curated only
-    if (livePOIs[activeTab]) return;        // already fetched
+    if (fetchedTabsRef.current.has(activeTab)) return; // already fetched
+    fetchedTabsRef.current.add(activeTab);
     if (CITY_DATA[city.name]?.[activeTab === 'highlights' ? 'highlights' : 'food']?.length > 0) {
       // We have curated data — still try live in background (silent, no spinner)
     }
@@ -635,7 +643,7 @@ export default function CityPanel({ city, onClose, onAddToTrip }) {
           setLivePOIs((prev) => ({ ...prev, [activeTab]: results }));
         }
       })
-      .catch(() => {})
+      .catch(() => { fetchedTabsRef.current.delete(activeTab); })
       .finally(() => {
         if (!ac.signal.aborted) {
           setPOIsLoading((p) => ({ ...p, [activeTab]: false }));
@@ -643,7 +651,7 @@ export default function CityPanel({ city, onClose, onAddToTrip }) {
       });
 
     return () => ac.abort();
-  }, [city?.name, city?.lat, city?.lng, activeTab]); // eslint-disable-line react-hooks/exhaustive-deps
+  }, [city?.name, city?.lat, city?.lng, activeTab]);
 
   const handleClose = useCallback(() => {
     if (typeof onClose === 'function') onClose();
