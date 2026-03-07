@@ -273,6 +273,149 @@ function OptimiseProgress({ progress }) {
   );
 }
 
+/* ── AI Itinerary Generator modal ───────────────────────────────────── */
+function AIItineraryModal({ trip, onClose, onApply }) {
+  const [destination, setDestination] = useState('');
+  const [numDays, setNumDays] = useState(3);
+  const [pace, setPace] = useState('balanced');
+  const [userIdeas, setUserIdeas] = useState('');
+  const [generating, setGenerating] = useState(false);
+  const [error, setError] = useState(null);
+  const [result, setResult] = useState(null);
+  const [applying, setApplying] = useState(false);
+
+  useEffect(() => {
+    if (trip?.name) setDestination(trip.name);
+    if (trip?.destinations?.[0]) setDestination((d) => d || trip.destinations[0]);
+  }, [trip?.name, trip?.destinations]);
+
+  async function handleGenerate(e) {
+    e.preventDefault();
+    if (!destination?.trim()) return setError('Destination is required.');
+    setGenerating(true);
+    setError(null);
+    setResult(null);
+    try {
+      const res = await fetch('/api/ai/itinerary', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          destination: destination.trim(),
+          numDays: Math.max(1, Math.min(14, Number(numDays) || 3)),
+          pace: pace || 'balanced',
+          interests: [],
+          userIdeas: userIdeas.trim() || undefined,
+        }),
+      });
+      const data = await res.json();
+      if (!res.ok) throw new Error(data.error || 'Failed to generate itinerary');
+      if (!Array.isArray(data?.days)) throw new Error('Invalid response from AI');
+      setResult(data);
+    } catch (err) {
+      setError(err.message || 'Failed to generate itinerary.');
+    } finally {
+      setGenerating(false);
+    }
+  }
+
+  async function handleApply() {
+    if (!result?.days?.length || !trip?.id) return;
+    setApplying(true);
+    setError(null);
+    try {
+      await onApply(result);
+      onClose();
+    } catch (err) {
+      setError(err.message || 'Failed to apply itinerary.');
+    } finally {
+      setApplying(false);
+    }
+  }
+
+  return (
+    <div className="fixed inset-0 z-50 flex items-center justify-center p-4">
+      <div className="absolute inset-0 bg-black/60 backdrop-blur-sm" onClick={onClose} />
+      <div
+        className="relative glass-heavy rounded-2xl w-full max-w-lg max-h-[90vh] overflow-hidden flex flex-col shadow-card"
+        style={{ animation: 'slide-up 0.3s ease both' }}
+      >
+        <div className="flex items-center justify-between p-4 border-b border-white/[0.06] flex-shrink-0">
+          <h2 className="text-base font-bold text-white">Generate with AI</h2>
+          <button type="button" onClick={onClose} className="p-1.5 rounded-lg text-atlas-text-muted hover:text-white hover:bg-white/[0.06]">
+            <XIcon />
+          </button>
+        </div>
+        <div className="p-4 overflow-y-auto flex-1 min-h-0 space-y-4">
+          {!result ? (
+            <form onSubmit={handleGenerate} className="space-y-4">
+              <div>
+                <label className="block text-xs font-medium text-atlas-text-muted mb-1.5">Destination</label>
+                <input
+                  type="text"
+                  value={destination}
+                  onChange={(e) => setDestination(e.target.value)}
+                  placeholder="e.g. Lisbon, Portugal"
+                  className="atlas-input w-full"
+                />
+              </div>
+              <div className="grid grid-cols-2 gap-3">
+                <div>
+                  <label className="block text-xs font-medium text-atlas-text-muted mb-1.5">Days</label>
+                  <input
+                    type="number"
+                    min={1}
+                    max={14}
+                    value={numDays}
+                    onChange={(e) => setNumDays(e.target.value)}
+                    className="atlas-input w-full"
+                  />
+                </div>
+                <div>
+                  <label className="block text-xs font-medium text-atlas-text-muted mb-1.5">Pace</label>
+                  <select value={pace} onChange={(e) => setPace(e.target.value)} className="atlas-input w-full">
+                    <option value="relaxed">Relaxed</option>
+                    <option value="balanced">Balanced</option>
+                    <option value="packed">Packed</option>
+                  </select>
+                </div>
+              </div>
+              <div>
+                <label className="block text-xs font-medium text-atlas-text-muted mb-1.5">Preferences (optional)</label>
+                <textarea
+                  value={userIdeas}
+                  onChange={(e) => setUserIdeas(e.target.value)}
+                  placeholder="e.g. focus on food, avoid crowds..."
+                  rows={2}
+                  className="atlas-input w-full resize-none"
+                />
+              </div>
+              {error && <p className="text-xs text-red-400 px-3 py-2 rounded-lg bg-red-500/10 border border-red-500/20">{error}</p>}
+              <button type="submit" disabled={generating} className="btn-glow w-full">
+                {generating ? 'Generating itinerary…' : 'Generate itinerary'}
+              </button>
+            </form>
+          ) : (
+            <>
+              <p className="text-sm text-atlas-text-secondary">
+                {result.days.length} days, {result.days.reduce((n, d) => n + (d.locations?.length ?? 0), 0)} stops
+              </p>
+              {error && <p className="text-xs text-red-400 px-3 py-2 rounded-lg bg-red-500/10 border border-red-500/20">{error}</p>}
+              <div className="flex gap-3">
+                <button type="button" onClick={() => { setResult(null); setError(null); }} className="btn-ghost flex-1">
+                  Back
+                </button>
+                <button type="button" onClick={handleApply} disabled={applying} className="btn-glow flex-1">
+                  {applying ? 'Applying…' : 'Apply to trip'}
+                </button>
+              </div>
+            </>
+          )}
+        </div>
+      </div>
+    </div>
+  );
+}
+
 /* ── Trip detail page ───────────────────────────────────────────────── */
 export default function TripDetailPage() {
   const router = useRouter();
@@ -380,6 +523,55 @@ export default function TripDetailPage() {
   function clearOptimisation() {
     setOptimisedRoute(null);
     setRouteGeoJSON(null);
+  }
+
+  async function handleApplyItinerary(itinerary) {
+    const prev = trip;
+    if (!prev?.id) throw new Error('Trip not loaded');
+    const existingDays = (prev.trip_days ?? []).slice().sort((a, b) => (a.day_number ?? 0) - (b.day_number ?? 0));
+    const existingNumbers = new Set(existingDays.map((d) => d.day_number));
+    const toInsert = (itinerary.days || []).filter((d) => !existingNumbers.has(d.day_number)).map((d) => ({
+      day_number: d.day_number ?? 0,
+      title: d.theme || `Day ${d.day_number}`,
+    }));
+    if (toInsert.length > 0 && isOnline()) {
+      await insertTripDays(prev.id, toInsert);
+    }
+    let fetched = prev;
+    if (isOnline()) {
+      const data = await fetchTrip(prev.id);
+      if (data) fetched = data;
+    }
+    const dayIdByNumber = new Map((fetched.trip_days ?? []).map((d) => [d.day_number, d.id]));
+    const locations = (itinerary.days || []).flatMap((genDay) =>
+      (genDay.locations || []).map((loc, order) => ({
+        trip_id: prev.id,
+        day_id: dayIdByNumber.get(genDay.day_number),
+        name: loc.name || 'Unknown',
+        type: loc.type || 'attraction',
+        address: loc.address || null,
+        lat: loc.lat ?? null,
+        lng: loc.lng ?? null,
+        notes: loc.notes || null,
+        duration_minutes: loc.duration_minutes ?? 60,
+        visit_order: order,
+      }))
+    ).filter((l) => l.day_id);
+    if (locations.length > 0 && isOnline()) {
+      await upsertLocations(locations);
+    }
+    if (Array.isArray(itinerary.recommended_additions) && itinerary.recommended_additions.length > 0 && isOnline()) {
+      const sections = { ...(fetched.sections || {}), recommended_additions: itinerary.recommended_additions };
+      await updateTrip(prev.id, { sections });
+    }
+    const updated = isOnline() ? await fetchTrip(prev.id) : { ...fetched, trip_days: fetched.trip_days };
+    if (updated) {
+      const hasRecs = Array.isArray(itinerary.recommended_additions) && itinerary.recommended_additions.length > 0;
+      const finalTrip = hasRecs ? { ...updated, sections: { ...(updated.sections || {}), recommended_additions: itinerary.recommended_additions } } : updated;
+      setTrip(finalTrip);
+      cacheTrip(finalTrip);
+    }
+    setShowItineraryGen(false);
   }
 
   const dayCardRefs = useRef({});
