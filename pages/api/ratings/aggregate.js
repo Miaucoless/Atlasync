@@ -7,7 +7,7 @@
  * Fetches ratings from configured sources in parallel:
  *   - Yelp Fusion       (YELP_API_KEY)
  *   - TripAdvisor       (TRIPADVISOR_API_KEY)
- *   - Google Places     (GOOGLE_PLACES_API_KEY)
+ *   - (Google source removed; use Yelp/TripAdvisor)
  *
  * Returns:
  *   {
@@ -107,26 +107,8 @@ async function fetchTripAdvisor(name, lat, lng) {
   };
 }
 
-async function fetchGoogle(name, lat, lng) {
-  const key = process.env.GOOGLE_PLACES_API_KEY;
-  if (!key) return null;
-
-  const params = new URLSearchParams({ query: name, key, fields: 'rating,user_ratings_total' });
-  if (lat && lng) { params.set('location', `${lat},${lng}`); params.set('radius', '500'); }
-
-  const r = await fetch(`https://maps.googleapis.com/maps/api/place/textsearch/json?${params}`);
-  if (!r.ok) return null;
-  const data  = await r.json();
-  const place = data.results?.[0];
-  if (!place?.rating) return null;
-
-  return {
-    source:    'google',
-    ...SOURCE_META.google,
-    rating:    place.rating,
-    reviews:   place.user_ratings_total ?? 0,
-    available: true,
-  };
+async function fetchGoogle() {
+  return null;
 }
 
 /* ── Weighted average ──────────────────────────────────────────────────── */

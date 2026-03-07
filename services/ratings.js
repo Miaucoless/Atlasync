@@ -4,7 +4,6 @@
  * Client-side service that fetches and aggregates ratings from multiple sources.
  *
  * Sources (all server-proxied to protect API keys):
- *   - Google Places   (requires GOOGLE_PLACES_API_KEY)
  *   - Yelp Fusion     (requires YELP_API_KEY)
  *   - TripAdvisor     (requires TRIPADVISOR_API_KEY)
  *

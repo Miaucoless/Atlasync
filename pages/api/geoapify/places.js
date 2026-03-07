@@ -9,7 +9,7 @@
 export default async function handler(req, res) {
   if (req.method !== 'GET') return res.status(405).json({ error: 'Method not allowed' });
 
-  const { categories, lat, lng, radius = 5000, limit = 6 } = req.query;
+  const { categories, lat, lng, radius = 5000, limit = 6, lang = 'en' } = req.query;
   if (!categories) return res.status(400).json({ error: '`categories` is required' });
 
   const apiKey = process.env.GEOAPIFY_API_KEY;
@@ -18,9 +18,12 @@ export default async function handler(req, res) {
   }
 
   try {
+    // Sanitize lang: take only the primary subtag ('en', 'fr', 'ja', etc.)
+    const safeLang = String(lang || 'en').split('-')[0].toLowerCase() || 'en';
     const params = new URLSearchParams({
       categories,
       limit: String(limit),
+      lang: safeLang,
       apiKey,
     });
     if (lat && lng) {
@@ -51,6 +54,6 @@ export default async function handler(req, res) {
     return res.status(200).json({ results, available: true });
   } catch (e) {
     console.error('[geoapify/places]', e.message);
-    return res.status(200).json({ results: [], available: false });
+    return res.status(200).json({ results: [], available: true });
   }
 }

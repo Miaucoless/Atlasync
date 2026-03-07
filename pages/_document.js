@@ -15,6 +15,7 @@ export default function Document() {
         {/* App meta */}
         <meta name="description" content="Atlasync — Plan, explore, and sync your travels with a cinematic 3D interface." />
         <meta name="theme-color" content="#050810" />
+        <meta name="mobile-web-app-capable" content="yes" />
         <meta name="apple-mobile-web-app-capable" content="yes" />
         <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent" />
 

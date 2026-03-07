@@ -9,10 +9,38 @@
  *  ✦ Active marker pulse ring synced to card state
  */
 
-import { useEffect, useRef, useState, useCallback } from 'react';
-import { searchPlaces } from '../services/places';
+import { useEffect, useLayoutEffect, useRef, useState, useCallback } from 'react';
+import { searchPlaces, getPlaceDetailsByLocation } from '../services/places';
 
 const MAPBOX_TOKEN = process.env.NEXT_PUBLIC_MAPBOX_TOKEN;
+
+/** Module-level Places cache — faster first layer before services/places cache */
+const placesCache = new Map(); // key: "lat.toFixed(4),lng.toFixed(4)" → { data, timestamp }
+const PLACES_CACHE_TTL = 5 * 60 * 1000; // 5 minutes
+
+/** Category emoji for info card badges */
+const CATEGORY_EMOJIS = {
+  restaurant:'🍽', cafe:'☕', bar:'🍸', hotel:'🏨', lodging:'🏨',
+  museum:'🏛', tourist_attraction:'🗺', art_gallery:'🎨',
+  library:'📚', park:'🌿', night_club:'🎵', store:'🛍',
+  church:'⛪', hospital:'🏥', school:'🎓',
+};
+function getCategoryBadge(primaryType) {
+  if (!primaryType) return null;
+  const key = primaryType.toLowerCase().replace(/ /g, '_');
+  const emoji = CATEGORY_EMOJIS[key] || '📍';
+  return `${emoji} ${primaryType}`;
+}
+function getCuisineSubtype(primaryType, rawCategory) {
+  // Extract last segment of dotted category (e.g. "catering.restaurant.pizza" → "pizza")
+  const raw = rawCategory || primaryType || '';
+  const parts = raw.split('.');
+  if (parts.length < 2) return '';
+  const sub = parts[parts.length - 1].replace(/_/g, ' ').replace(/\b\w/g, c => c.toUpperCase());
+  const main = primaryType || '';
+  if (sub.toLowerCase() === main.toLowerCase() || sub.length < 3) return '';
+  return sub;
+}
 
 /** Reverse geocode lng, lat to place name and short description via Mapbox */
 async function reverseGeocode(lng, lat) {
@@ -44,12 +72,23 @@ async function reverseGeocode(lng, lat) {
   }
 }
 
-/** Fetch POIs in bbox via Mapbox Geocoding; returns GeoJSON FeatureCollection of points for heatmap. */
-async function fetchPoisInBounds(bbox) {
+/** Heatmap filter config: UI key → Mapbox search queries */
+const HEATMAP_FILTERS = {
+  food:           ['restaurant', 'cafe'],
+  sightseeing:    ['tourist_attraction', 'museum'],
+  nightlife:     ['bar', 'night_club'],
+  cultural:       ['museum', 'art_gallery', 'library'],
+  shopping:       ['clothing_store', 'shopping_mall', 'store'],
+  scenic:         ['park', 'natural_feature', 'viewpoint'],
+};
+
+/** Fetch POIs in bbox for heatmap; categories = array of HEATMAP_FILTERS keys (e.g. ['food','sightseeing']). */
+async function fetchPoisInBounds(bbox, categories = ['food', 'sightseeing']) {
   if (!MAPBOX_TOKEN || !bbox || bbox.length !== 4) return { type: 'FeatureCollection', features: [] };
   const [west, south, east, north] = bbox;
   const bboxStr = [west, south, east, north].join(',');
-  const queries = ['restaurant', 'cafe', 'attraction'];
+  const queries = [...new Set(categories.flatMap((c) => HEATMAP_FILTERS[c] || []))];
+  if (queries.length === 0) return { type: 'FeatureCollection', features: [] };
   const allCoords = new Set();
   try {
     const results = await Promise.all(
@@ -100,6 +139,20 @@ function isValidCoord(lat, lng) {
   );
 }
 
+/** Normalize location to { ...loc, lat, lng } with numeric coords (supports lat/lng or latitude/longitude). */
+function normalizeLocation(loc) {
+  if (!loc || typeof loc !== 'object') return null;
+  const lat = typeof loc.lat === 'number' ? loc.lat : (typeof loc.latitude === 'number' ? loc.latitude : Number(loc.lat ?? loc.latitude));
+  const lng = typeof loc.lng === 'number' ? loc.lng : (typeof loc.longitude === 'number' ? loc.longitude : Number(loc.lng ?? loc.longitude));
+  if (!Number.isFinite(lat) || !Number.isFinite(lng)) return null;
+  return { ...loc, lat, lng };
+}
+
+/** Safe locations list (never undefined for map/effects). */
+function safeLocations(locs) {
+  return Array.isArray(locs) ? locs : [];
+}
+
 function escapeHtml(s) {
   if (!s) return '';
   const div = document.createElement('div');
@@ -107,10 +160,26 @@ function escapeHtml(s) {
   return div.innerHTML;
 }
 
+/** Temporary pulsing hollow ring — placed at the clicked point during exploration popup. */
+function createTempPinEl() {
+  const el = document.createElement('div');
+  el.style.cssText = `
+    width: 24px;
+    height: 24px;
+    border-radius: 50%;
+    border: 2px solid #3B82F6;
+    background: rgba(59,130,246,0.15);
+    animation: atlas-temp-pin-pulse 1.4s ease-out infinite;
+    pointer-events: none;
+  `;
+  return el;
+}
+
 /** Pin-only element (no label) — used when location is selected. */
 function createPinOnlyEl(type, delay = 0) {
   const cfg = TYPE_CONFIG[type] || TYPE_CONFIG.attraction;
   const el = document.createElement('div');
+  el.className = 'atlas-saved-pin';
   el.style.cssText = `
     box-sizing: border-box;
     display: flex;
@@ -183,23 +252,26 @@ function createPinWithLabelEl(name, type, delay = 0) {
 }
 
 export default function Map({
-  locations           = [],
-  routeGeoJSON        = null,
-  activeId            = null,
-  onMarkerClick       = () => {},
-  onMapClick          = null,
-  days                = [],
-  onAddLocationToDay  = null,
-  className           = '',
+  locations             = [],
+  routeGeoJSON          = null,
+  dayRouteGeoJSON       = null,
+  activeId              = null,
+  onMarkerClick         = () => {},
+  onMapClick            = null,
+  days                  = [],
+  onAddLocationToDay    = null,
+  activeCategoryFilters = null,
+  className             = '',
   style: styleProp,
-  initialCenter       = [-74.0060, 40.7128],
-  initialZoom         = 2,
+  initialCenter         = [-74.0060, 40.7128],
+  initialZoom           = 2,
 }) {
   const mapContainer   = useRef(null);
   const mapRef         = useRef(null);
   const markersRef     = useRef([]);
   const popupRef       = useRef(null);
   const placePopupRef  = useRef(null);
+  const tempMarkerRef  = useRef(null);
   const dashOffsetRef  = useRef(null);
   const viewModeRef    = useRef('street');
   const currentStyleRef = useRef(styleProp === STYLE_DARK ? STYLE_DARK : STYLE_STREET);
@@ -209,15 +281,20 @@ export default function Map({
   const [error,       setError]       = useState(null);
   const [viewMode,    setViewMode]    = useState(styleProp === STYLE_DARK ? 'dark' : 'street');
   const [showHeatmap, setShowHeatmap] = useState(false);
+  const [heatmapFilters, setHeatmapFilters] = useState(['food', 'sightseeing']);
   const [locationDescription, setLocationDescription] = useState(null);
   const [descriptionLoading, setDescriptionLoading] = useState(false);
+  const heatmapBoundsRef = useRef(null);
+  const heatmapMoveEndRef = useRef(null);
 
   viewModeRef.current = viewMode;
-  const activeLoc = activeId ? locations.find((l) => l.id === activeId) : null;
+  const locs = safeLocations(locations);
+  const activeLoc = activeId ? locs.find((l) => l.id === activeId) : null;
 
-  /* ── Initialise Mapbox (street style by default) ────────────────── */
-  useEffect(() => {
-    if (!mapContainer.current || mapRef.current) return;
+  /* ── Initialise Mapbox (useLayoutEffect so container ref is set and has size) ────────────────── */
+  useLayoutEffect(() => {
+    const container = mapContainer.current;
+    if (!container || mapRef.current) return;
 
     if (!MAPBOX_TOKEN) {
       setError('Mapbox token missing. Set NEXT_PUBLIC_MAPBOX_TOKEN in .env.local');
@@ -229,11 +306,14 @@ export default function Map({
     currentStyleRef.current = initialStyle;
 
     import('mapbox-gl').then((mod) => {
+      // Guard: if the component unmounted before the import resolved, bail out.
+      if (!document.body.contains(container)) return;
+
       const mapboxgl = mod.default;
       mapboxgl.accessToken = MAPBOX_TOKEN;
 
       const map = new mapboxgl.Map({
-        container:    mapContainer.current,
+        container,
         style:       initialStyle,
         center:       initialCenter,
         zoom:         initialZoom,
@@ -252,6 +332,9 @@ export default function Map({
             'star-intensity': 0.1,
           });
         }
+        // Resize immediately and again after a tick to ensure container has settled.
+        map.resize();
+        requestAnimationFrame(() => { map.resize(); });
         setMapReady(true);
       });
 
@@ -278,7 +361,6 @@ export default function Map({
     const url = viewMode === 'dark' ? STYLE_DARK : STYLE_STREET;
     if (currentStyleRef.current === url) return;
     currentStyleRef.current = url;
-    if (viewMode === 'street') setShowHeatmap(false);
     const map = mapRef.current;
     map.setStyle(url);
     map.once('style.load', () => {
@@ -299,7 +381,7 @@ export default function Map({
   const heatmapSourceId = 'atlas-heatmap-pois';
   const heatmapLayerId = 'atlas-heatmap-pois-layer';
   useEffect(() => {
-    if (!mapRef.current || !mapReady || viewMode !== 'dark') return;
+    if (!mapRef.current || !mapReady) return;
     const map = mapRef.current;
 
     const removeHeatmap = () => {
@@ -317,7 +399,16 @@ export default function Map({
     let cancelled = false;
     const bounds = map.getBounds();
     const bbox = bounds ? [bounds.getWest(), bounds.getSouth(), bounds.getEast(), bounds.getNorth()] : null;
-    fetchPoisInBounds(bbox).then((geojson) => {
+
+    const updateHeatmapData = (b) => {
+      if (!map.getSource(heatmapSourceId)) return;
+      fetchPoisInBounds(b, heatmapFilters).then((geo) => {
+        if (!mapRef.current || !map.getSource(heatmapSourceId)) return;
+        map.getSource(heatmapSourceId).setData(geo);
+      });
+    };
+
+    fetchPoisInBounds(bbox, heatmapFilters).then((geojson) => {
       if (cancelled || !mapRef.current) return;
       removeHeatmap();
       if (geojson.features.length === 0) return;
@@ -334,24 +425,37 @@ export default function Map({
             'heatmap-color': [
               'interpolate', ['linear'], ['heatmap-density'],
               0, 'rgba(0, 0, 0, 0)',
-              0.2, 'rgba(59, 130, 246, 0.4)',
-              0.5, 'rgba(6, 182, 212, 0.6)',
-              0.8, 'rgba(245, 158, 11, 0.8)',
-              1, 'rgba(239, 68, 68, 0.9)',
+              0.12, 'rgba(34, 126, 230, 0.5)',
+              0.25, 'rgba(22, 163, 74, 0.55)',
+              0.45, 'rgba(234, 179, 8, 0.7)',
+              0.65, 'rgba(249, 115, 22, 0.8)',
+              0.85, 'rgba(239, 68, 68, 0.9)',
+              1, 'rgba(185, 28, 28, 0.95)',
             ],
-            'heatmap-radius': 20,
-            'heatmap-opacity': 0.7,
+            'heatmap-radius': 22,
+            'heatmap-opacity': 0.75,
           },
         },
         map.getStyle().layers?.find((l) => l.id === 'building') ? 'building' : undefined
       );
+      const onMoveEnd = () => {
+        if (!mapRef.current || !map.getSource(heatmapSourceId)) return;
+        const b = map.getBounds();
+        updateHeatmapData([b.getWest(), b.getSouth(), b.getEast(), b.getNorth()]);
+      };
+      heatmapMoveEndRef.current = onMoveEnd;
+      map.on('moveend', onMoveEnd);
     });
 
     return () => {
       cancelled = true;
+      if (heatmapMoveEndRef.current && mapRef.current) {
+        mapRef.current.off('moveend', heatmapMoveEndRef.current);
+        heatmapMoveEndRef.current = null;
+      }
       removeHeatmap();
     };
-  }, [mapReady, viewMode, showHeatmap, styleVersion]);
+  }, [mapReady, showHeatmap, heatmapFilters, styleVersion]);
 
   /* ── Update markers: name+pin when unselected, pin-only when selected ── */
   useEffect(() => {
@@ -360,7 +464,10 @@ export default function Map({
     const map = mapRef.current;
     map.resize();
 
-    const validLocations = locations.filter((loc) => isValidCoord(loc.lat, loc.lng));
+    const validLocations = safeLocations(locations)
+      .map(normalizeLocation)
+      .filter(Boolean)
+      .filter((loc) => isValidCoord(loc.lat, loc.lng));
 
     const addMarkers = () => {
       import('mapbox-gl').then(({ default: mapboxgl }) => {
@@ -368,11 +475,17 @@ export default function Map({
         markersRef.current.forEach((m) => m.remove());
         markersRef.current = [];
 
+        const filters = activeCategoryFilters && activeCategoryFilters.length > 0;
         validLocations.forEach((loc, idx) => {
           const isSelected = loc.id === activeId;
+          const emphasized = !filters || activeCategoryFilters.includes(loc.type);
           const el = isSelected
             ? createPinOnlyEl(loc.type, idx * 80)
             : createPinWithLabelEl(loc.name, loc.type, idx * 80);
+          if (!emphasized) {
+            el.style.opacity = '0.4';
+            el.style.filter = 'grayscale(0.6)';
+          }
 
           const marker = new mapboxgl.Marker({ element: el, anchor: 'bottom' })
             .setLngLat([loc.lng, loc.lat])
@@ -401,7 +514,7 @@ export default function Map({
     requestAnimationFrame(() => {
       requestAnimationFrame(addMarkers);
     });
-  }, [locations, mapReady, onMarkerClick, styleVersion, activeId]);
+  }, [locations, mapReady, onMarkerClick, styleVersion, activeId, activeCategoryFilters]);
 
   /* ── Fetch place description when active location changes (for popup) ── */
   useEffect(() => {
@@ -412,17 +525,25 @@ export default function Map({
     }
     setDescriptionLoading(true);
     setLocationDescription(null);
-    searchPlaces(activeLoc.name, activeLoc.lat, activeLoc.lng)
-      .then((results) => {
-        const first = results?.[0];
-        const desc = first?.description || first?.editorial_summary?.overview;
-        if (desc && typeof desc === 'string' && desc.trim().length > 20) {
-          const g = ['point of interest', 'establishment', 'point_of_interest', 'a place to visit', 'a popular place'];
+    getPlaceDetailsByLocation(activeLoc.lat, activeLoc.lng, activeLoc.name)
+      .then((details) => {
+        const desc = details?.description;
+        if (desc && typeof desc === 'string' && desc.trim().length > 15) {
+          const generic = ['point of interest', 'establishment', 'point_of_interest', 'a place to visit', 'a popular place'];
           const lower = desc.trim().toLowerCase();
-          const isGeneric = g.some((x) => lower === x || lower.startsWith(x + ' ') || lower.endsWith(' ' + x));
+          const isGeneric = generic.some((x) => lower === x || lower.startsWith(x + ' ') || lower.endsWith(' ' + x));
           setLocationDescription(isGeneric ? null : desc.trim());
         } else {
-          setLocationDescription(null);
+          return searchPlaces(activeLoc.name, activeLoc.lat, activeLoc.lng).then((results) => {
+            const first = results?.[0];
+            const fallback = first?.description;
+            if (fallback && typeof fallback === 'string' && fallback.trim().length > 20) {
+              const g = ['point of interest', 'establishment', 'point_of_interest', 'a place to visit', 'a popular place'];
+              const lower = fallback.trim().toLowerCase();
+              const isGeneric = g.some((x) => lower === x || lower.startsWith(x + ' ') || lower.endsWith(' ' + x));
+              setLocationDescription(isGeneric ? null : fallback.trim());
+            } else setLocationDescription(null);
+          });
         }
       })
       .catch(() => setLocationDescription(null))
@@ -454,7 +575,7 @@ export default function Map({
       </button>
       <div style="font-size: 11px; font-weight: 700; text-transform: uppercase; letter-spacing: 0.05em; color: ${escapeHtml(cfg.color)}; margin-bottom: 8px;">${escapeHtml((TYPE_CONFIG[activeLoc.type] || TYPE_CONFIG.attraction).label)}</div>
       <div style="font-size: 16px; font-weight: 600; color: #F8FAFC; margin-bottom: 10px; line-height: 1.35;">${escapeHtml(activeLoc.name || 'Place')}</div>
-      ${desc ? `<div class="atlas-popup-desc" style="font-size: 15px; font-weight: 400; color: #F1F5F9; line-height: 1.65; letter-spacing: 0.02em; margin-bottom: 0;">${escapeHtml(desc.slice(0, 280))}${desc.length > 280 ? '…' : ''}</div>` : ''}
+      ${desc ? `<div class="atlas-popup-desc" style="font-size: 15px; font-weight: 400; color: #F1F5F9; line-height: 1.65; letter-spacing: 0.02em; margin-bottom: 0;">${escapeHtml(desc.slice(0, 420))}${desc.length > 420 ? '…' : ''}</div>` : ''}
     `;
     const closeBtn = container.querySelector('.atlas-popup-close');
     if (closeBtn) {
@@ -484,115 +605,201 @@ export default function Map({
     };
   }, [activeId, activeLoc, mapReady, locationDescription, descriptionLoading]);
 
-  /* ── Map click: reverse geocode and show place popup with "Add to day" ── */
+  /* ── Map click: debounced; reverse geocode + Geoapify Places; one temp popup at a time ── */
   useEffect(() => {
     if (!mapReady || !mapRef.current) return;
     const map = mapRef.current;
+    let clickTimeout = null;
+    const DEBOUNCE_MS = 200;
 
-    const handler = async (e) => {
+    const handler = (e) => {
+      const clickedLng = typeof e.lngLat?.lng === 'number' ? e.lngLat.lng : Number(e.lngLat?.lng);
+      const clickedLat = typeof e.lngLat?.lat === 'number' ? e.lngLat.lat : Number(e.lngLat?.lat);
+      if (!Number.isFinite(clickedLat) || !Number.isFinite(clickedLng)) return;
+
       onMapClick?.();
-      const { lng, lat } = e.lngLat;
       if (placePopupRef.current) {
         placePopupRef.current.remove();
         placePopupRef.current = null;
       }
+      if (tempMarkerRef.current) {
+        tempMarkerRef.current.remove();
+        tempMarkerRef.current = null;
+      }
+      if (clickTimeout) clearTimeout(clickTimeout);
+      clickTimeout = setTimeout(async () => {
+        clickTimeout = null;
+        const lng = clickedLng;
+        const lat = clickedLat;
 
-      const place = await reverseGeocode(lng, lat);
-      if (!place) return;
+        // Place a temporary pulsing pin immediately at the clicked location
+        import('mapbox-gl').then(({ default: mapboxgl }) => {
+          if (!mapRef.current) return;
+          tempMarkerRef.current = new mapboxgl.Marker({ element: createTempPinEl(), anchor: 'center' })
+            .setLngLat([lng, lat])
+            .addTo(mapRef.current);
+        });
 
-      import('mapbox-gl').then(({ default: mapboxgl }) => {
-        if (!mapRef.current) return;
+        const place = await reverseGeocode(lng, lat);
+        if (!place) {
+          if (tempMarkerRef.current) { tempMarkerRef.current.remove(); tempMarkerRef.current = null; }
+          return;
+        }
 
-        const container = document.createElement('div');
-        container.className = 'atlas-map-popup';
-        container.style.cssText = 'position: relative; min-width: 220px; max-width: 300px; font-family: system-ui, -apple-system, sans-serif; padding-right: 32px;';
-        container.innerHTML = `
-          <button type="button" class="atlas-place-popup-close" aria-label="Close" style="
-            position: absolute; top: 0; right: 0; width: 28px; height: 28px; padding: 0; margin: 0; border: none; background: rgba(255,255,255,0.08); color: #94A3B8; border-radius: 8px; cursor: pointer; display: flex; align-items: center; justify-content: center; transition: color 0.2s, background 0.2s;
-          ">
-            <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/></svg>
-          </button>
-          <div style="padding: 2px 0;">
-            <div style="font-size: 16px; font-weight: 600; color: #F8FAFC; margin-bottom: 10px; line-height: 1.35;">${escapeHtml(place.name)}</div>
-            ${place.description ? `<div class="atlas-popup-desc" style="font-size: 15px; font-weight: 400; color: #F1F5F9; line-height: 1.65; letter-spacing: 0.02em; margin-bottom: 12px;">${escapeHtml(place.description)}</div>` : ''}
-            ${days.length > 0 && onAddLocationToDay ? `
-              <div class="atlas-add-section" style="margin-top: 10px; padding-top: 10px; border-top: 1px solid rgba(255,255,255,0.1);">
-                <button type="button" class="atlas-add-btn" style="width: 100%; padding: 8px 12px; font-size: 13px; font-weight: 600; color: #fff; background: linear-gradient(135deg, #3B82F6, #06B6D4); border: none; border-radius: 8px; cursor: pointer;">Add to itinerary</button>
-                <div class="atlas-add-form" style="display: none; margin-top: 10px;">
-                  <label style="display: block; font-size: 11px; font-weight: 600; color: #94A3B8; margin-bottom: 4px; text-transform: uppercase;">Day</label>
-                  <select class="atlas-day-select" style="width: 100%; padding: 8px 10px; font-size: 14px; color: #F1F5F9; background: rgba(255,255,255,0.08); border: 1px solid rgba(255,255,255,0.15); border-radius: 8px; margin-bottom: 10px;"></select>
-                  <label style="display: block; font-size: 11px; font-weight: 600; color: #94A3B8; margin-bottom: 4px; text-transform: uppercase;">Notes (optional)</label>
-                  <textarea class="atlas-notes-input" placeholder="Add a note..." rows="2" style="width: 100%; padding: 8px 10px; font-size: 14px; color: #F1F5F9; background: rgba(255,255,255,0.08); border: 1px solid rgba(255,255,255,0.15); border-radius: 8px; resize: vertical; min-height: 56px;"></textarea>
-                  <button type="button" class="atlas-confirm-add" style="width: 100%; margin-top: 10px; padding: 8px 12px; font-size: 13px; font-weight: 600; color: #fff; background: rgba(16,185,129,0.9); border: none; border-radius: 8px; cursor: pointer;">Add</button>
+        const shortDesc = (text) => {
+          if (!text || !text.trim()) return '';
+          const t = text.trim();
+          const firstSentence = t.match(/^[^.!?]+[.!?]?/)?.[0]?.trim() || t;
+          return firstSentence.length <= 140 ? firstSentence : firstSentence.slice(0, 137) + '…';
+        };
+
+        // Check module-level cache first (B6), then Geoapify
+        const cacheKey = `${lat.toFixed(4)},${lng.toFixed(4)}`;
+        const cached = placesCache.get(cacheKey);
+        let placeDetails = null;
+        if (cached && (Date.now() - cached.timestamp < PLACES_CACHE_TTL)) {
+          placeDetails = cached.data;
+        } else {
+          try {
+            placeDetails = await getPlaceDetailsByLocation(lat, lng, place.name);
+            placesCache.set(cacheKey, { data: placeDetails, timestamp: Date.now() });
+          } catch (_) { /* use Mapbox fallback */ }
+        }
+
+        const p = placeDetails;
+        const displayName = p?.name || place.name;
+        const displayAddress = p?.address || place.address || '';
+        const badge = getCategoryBadge(p?.primaryType);
+        const subtype = getCuisineSubtype(p?.primaryType, p?.rawCategory || p?.category);
+        const fullDescription = (p?.description || place.description || '').trim();
+        const description = shortDesc(fullDescription);
+        const hasMore = fullDescription.length > description.length;
+        const rating = p?.rating != null ? p.rating : null;
+        const reviews = p?.reviews != null ? p.reviews : 0;
+        const openNow = typeof p?.opening_hours === 'object' && p?.opening_hours !== null ? p.opening_hours?.open_now : undefined;
+        const weekdayText = typeof p?.opening_hours === 'object' && p?.opening_hours !== null ? p.opening_hours?.weekday_text?.[0] : undefined;
+        const openingHoursText = typeof p?.opening_hours === 'string' ? p.opening_hours : '';
+        const showOpenStatus = openNow !== undefined;
+        const hoursHint = weekdayText || openingHoursText || '';
+
+        import('mapbox-gl').then(({ default: mapboxgl }) => {
+          if (!mapRef.current) return;
+          const container = document.createElement('div');
+          container.className = 'atlas-map-popup';
+          container.style.cssText = 'position: relative; min-width: 240px; max-width: 320px; font-family: system-ui, -apple-system, sans-serif; padding-right: 32px;';
+          container.innerHTML = `
+            <button type="button" class="atlas-place-popup-close" aria-label="Close" style="position: absolute; top: 0; right: 0; width: 28px; height: 28px; padding: 0; margin: 0; border: none; background: rgba(255,255,255,0.08); color: #94A3B8; border-radius: 8px; cursor: pointer; display: flex; align-items: center; justify-content: center;"></button>
+            <div style="padding: 2px 0;">
+              ${badge ? `<div style="display: inline-flex; align-items: center; gap: 4px; font-size: 11px; font-weight: 600; background: rgba(59,130,246,0.12); color: #93C5FD; padding: 2px 8px; border-radius: 6px; border: 1px solid rgba(147,197,253,0.2); margin-bottom: 8px;">${escapeHtml(badge)}</div>` : ''}
+              <div style="font-size: 16px; font-weight: 600; color: #F8FAFC; margin-bottom: ${subtype ? '2px' : '8px'}; line-height: 1.35;">${escapeHtml(displayName)}</div>
+              ${subtype ? `<div style="font-size: 12px; color: #7DD3FC; margin-bottom: 8px;">${escapeHtml(subtype)}</div>` : ''}
+              ${rating != null ? `<div style="font-size: 13px; color: #FBBF24; margin-bottom: 4px;">★ ${Number(rating).toFixed(1)}${reviews ? ` · ${reviews} review${reviews !== 1 ? 's' : ''}` : ''}</div>` : ''}
+              ${displayAddress ? `<div style="font-size: 12px; color: #94A3B8; margin-bottom: 8px;">${escapeHtml(displayAddress)}</div>` : ''}
+              ${description ? `
+                <div class="atlas-popup-short-desc" style="font-size: 14px; color: #E2E8F0; line-height: 1.5; margin-bottom: ${hasMore ? '4px' : '10px'};">${escapeHtml(description)}</div>
+                ${hasMore ? `
+                  <button type="button" class="atlas-read-more-btn" style="font-size: 12px; color: #60A5FA; background: none; border: none; cursor: pointer; padding: 0; margin-bottom: 10px; display: block;">Read more ↓</button>
+                  <div class="atlas-popup-full-desc" style="display: none; font-size: 14px; color: #E2E8F0; line-height: 1.5; margin-bottom: 10px;">${escapeHtml(fullDescription)}</div>
+                ` : ''}
+              ` : ''}
+              ${showOpenStatus ? `
+                <div style="font-size: 12px; margin-bottom: 8px; display: flex; align-items: center; gap: 6px;">
+                  <span style="color: ${openNow ? '#10B981' : '#EF4444'}; font-size: 8px;">●</span>
+                  <span style="color: ${openNow ? '#10B981' : '#EF4444'}; font-weight: 500;">${openNow ? 'Open now' : 'Closed'}</span>
+                  ${hoursHint ? `<span style="color: #64748B;">· ${escapeHtml(hoursHint)}</span>` : ''}
                 </div>
-              </div>
-            ` : ''}
-          </div>
-        `;
-        const placeCloseBtn = container.querySelector('.atlas-place-popup-close');
-        if (placeCloseBtn) {
-          placeCloseBtn.addEventListener('mouseenter', () => { placeCloseBtn.style.color = '#F1F5F9'; placeCloseBtn.style.background = 'rgba(255,255,255,0.14)'; });
-          placeCloseBtn.addEventListener('mouseleave', () => { placeCloseBtn.style.color = '#94A3B8'; placeCloseBtn.style.background = 'rgba(255,255,255,0.08)'; });
-        }
-
-        const addBtn = container.querySelector('.atlas-add-btn');
-        const addForm = container.querySelector('.atlas-add-form');
-        const daySelect = container.querySelector('.atlas-day-select');
-        const notesInput = container.querySelector('.atlas-notes-input');
-        const confirmBtn = container.querySelector('.atlas-confirm-add');
-
-        if (addBtn && addForm && daySelect && confirmBtn && days.length > 0 && onAddLocationToDay) {
-          days.forEach((d) => {
-            const opt = document.createElement('option');
-            opt.value = d.id;
-            opt.textContent = `Day ${d.day_number ?? ''}`;
-            daySelect.appendChild(opt);
-          });
-          addBtn.addEventListener('click', () => {
-            addForm.style.display = addForm.style.display === 'none' ? 'block' : 'none';
-          });
-          confirmBtn.addEventListener('click', () => {
-            const dayId = daySelect.value;
-            const notes = notesInput ? notesInput.value.trim() || null : null;
-            onAddLocationToDay(dayId, {
-              name: place.name,
-              address: place.address || null,
-              description: place.description || null,
-              lat,
-              lng,
-              type: 'attraction',
-              notes,
-              duration_minutes: 60,
+              ` : hoursHint ? `<div style="font-size: 12px; color: #64748B; margin-bottom: 8px;">${escapeHtml(hoursHint)}</div>` : ''}
+              ${days.length > 0 && onAddLocationToDay ? `
+                <div class="atlas-add-section" style="margin-top: 10px; padding-top: 10px; border-top: 1px solid rgba(255,255,255,0.1);">
+                  <button type="button" class="atlas-add-btn" style="width: 100%; padding: 8px 12px; font-size: 13px; font-weight: 600; color: #fff; background: linear-gradient(135deg, #3B82F6, #06B6D4); border: none; border-radius: 8px; cursor: pointer;">Add to itinerary</button>
+                  <div class="atlas-add-form" style="display: none; margin-top: 10px;">
+                    <label style="display: block; font-size: 11px; font-weight: 600; color: #94A3B8; margin-bottom: 4px; text-transform: uppercase;">Day</label>
+                    <select class="atlas-day-select" style="width: 100%; padding: 8px 10px; font-size: 14px; color: #F1F5F9; background: rgba(255,255,255,0.08); border: 1px solid rgba(255,255,255,0.15); border-radius: 8px; margin-bottom: 10px;"></select>
+                    <label style="display: block; font-size: 11px; font-weight: 600; color: #94A3B8; margin-bottom: 4px; text-transform: uppercase;">Notes (optional)</label>
+                    <textarea class="atlas-notes-input" placeholder="Add a note..." rows="2" style="width: 100%; padding: 8px 10px; font-size: 14px; color: #F1F5F9; background: rgba(255,255,255,0.08); border: 1px solid rgba(255,255,255,0.15); border-radius: 8px; resize: vertical; min-height: 56px;"></textarea>
+                    <button type="button" class="atlas-confirm-add" style="width: 100%; margin-top: 10px; padding: 8px 12px; font-size: 13px; font-weight: 600; color: #fff; background: rgba(16,185,129,0.9); border: none; border-radius: 8px; cursor: pointer;">Add</button>
+                  </div>
+                </div>
+              ` : ''}
+            </div>
+          `;
+          const placeCloseBtn = container.querySelector('.atlas-place-popup-close');
+          if (placeCloseBtn) {
+            placeCloseBtn.innerHTML = '<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/></svg>';
+            placeCloseBtn.addEventListener('mouseenter', () => { placeCloseBtn.style.color = '#F1F5F9'; placeCloseBtn.style.background = 'rgba(255,255,255,0.14)'; });
+            placeCloseBtn.addEventListener('mouseleave', () => { placeCloseBtn.style.color = '#94A3B8'; placeCloseBtn.style.background = 'rgba(255,255,255,0.08)'; });
+          }
+          // Read more expand (B3)
+          const readMoreBtn = container.querySelector('.atlas-read-more-btn');
+          const fullDescEl  = container.querySelector('.atlas-popup-full-desc');
+          const shortDescEl = container.querySelector('.atlas-popup-short-desc');
+          if (readMoreBtn && fullDescEl && shortDescEl) {
+            readMoreBtn.addEventListener('click', () => {
+              shortDescEl.style.display = 'none';
+              fullDescEl.style.display  = 'block';
+              readMoreBtn.style.display = 'none';
             });
-            if (placePopupRef.current) {
-              placePopupRef.current.remove();
-              placePopupRef.current = null;
-            }
+          }
+          const addBtn = container.querySelector('.atlas-add-btn');
+          const addForm = container.querySelector('.atlas-add-form');
+          const daySelect = container.querySelector('.atlas-day-select');
+          const notesInput = container.querySelector('.atlas-notes-input');
+          const confirmBtn = container.querySelector('.atlas-confirm-add');
+          const payload = {
+            name: displayName,
+            address: displayAddress || null,
+            description: fullDescription || null,
+            lat: clickedLat,
+            lng: clickedLng,
+            type: p?.type || 'attraction',
+            notes: null,
+            duration_minutes: p?.duration ?? 60,
+          };
+          if (addBtn && addForm && daySelect && confirmBtn && days.length > 0 && onAddLocationToDay) {
+            days.forEach((d) => {
+              const opt = document.createElement('option');
+              opt.value = d.id;
+              opt.textContent = `Day ${d.day_number ?? ''}`;
+              daySelect.appendChild(opt);
+            });
+            addBtn.addEventListener('click', () => { addForm.style.display = addForm.style.display === 'none' ? 'block' : 'none'; });
+            confirmBtn.addEventListener('click', () => {
+              payload.notes = notesInput ? notesInput.value.trim() || null : null;
+              onAddLocationToDay(daySelect.value, payload);
+              if (placePopupRef.current) { placePopupRef.current.remove(); placePopupRef.current = null; }
+              if (tempMarkerRef.current) { tempMarkerRef.current.remove(); tempMarkerRef.current = null; }
+            });
+          }
+          const popup = new mapboxgl.Popup({
+            offset: 25,
+            closeButton: false,
+            closeOnClick: false,
+            className: 'atlas-map-popup',
+          })
+            .setLngLat([clickedLng, clickedLat])
+            .setDOMContent(container)
+            .addTo(mapRef.current);
+          placePopupRef.current = popup;
+          popup.on('close', () => {
+            placePopupRef.current = null;
+            if (tempMarkerRef.current) { tempMarkerRef.current.remove(); tempMarkerRef.current = null; }
           });
-        }
-
-        const popup = new mapboxgl.Popup({
-          offset: 25,
-          closeButton: false,
-          closeOnClick: false,
-          className: 'atlas-map-popup',
-        })
-          .setLngLat([lng, lat])
-          .setDOMContent(container)
-          .addTo(mapRef.current);
-
-        placePopupRef.current = popup;
-        popup.on('close', () => { placePopupRef.current = null; });
-        if (placeCloseBtn) placeCloseBtn.addEventListener('click', () => { popup.remove(); placePopupRef.current = null; });
-      });
+          if (placeCloseBtn) placeCloseBtn.addEventListener('click', () => { popup.remove(); placePopupRef.current = null; });
+        });
+      }, DEBOUNCE_MS);
     };
 
     map.on('click', handler);
     return () => {
+      if (clickTimeout) clearTimeout(clickTimeout);
       map.off('click', handler);
       if (placePopupRef.current) {
         placePopupRef.current.remove();
         placePopupRef.current = null;
+      }
+      if (tempMarkerRef.current) {
+        tempMarkerRef.current.remove();
+        tempMarkerRef.current = null;
       }
     };
   }, [mapReady, onMapClick, days, onAddLocationToDay]);
@@ -697,10 +904,45 @@ export default function Map({
     return () => clearTimeout(t);
   }, [routeGeoJSON, mapReady, styleVersion]);
 
+  /* ── Day route (Geoapify driving/walk line): layer id day-route ─── */
+  useEffect(() => {
+    if (!mapReady || !mapRef.current) return;
+    const map = mapRef.current;
+    if (map.getLayer('day-route')) map.removeLayer('day-route');
+    if (map.getSource('day-route')) map.removeSource('day-route');
+
+    if (!dayRouteGeoJSON?.features?.length) return;
+    const feat = dayRouteGeoJSON.features[0];
+    const coords = feat?.geometry?.coordinates;
+    if (!coords || coords.length < 2) return;
+
+    const fc = {
+      type: 'FeatureCollection',
+      features: [{ type: 'Feature', geometry: { type: 'LineString', coordinates: coords }, properties: {} }],
+    };
+    map.addSource('day-route', { type: 'geojson', data: fc });
+    map.addLayer({
+      id: 'day-route',
+      type: 'line',
+      source: 'day-route',
+      layout: { 'line-join': 'round', 'line-cap': 'round' },
+      paint: {
+        'line-color': '#10B981',
+        'line-width': 5,
+        'line-opacity': 0.95,
+      },
+    });
+
+    return () => {
+      if (map.getLayer('day-route')) map.removeLayer('day-route');
+      if (map.getSource('day-route')) map.removeSource('day-route');
+    };
+  }, [mapReady, styleVersion, dayRouteGeoJSON]);
+
   /* ── Fly to active marker (or pan only if already zoomed in) ─────── */
   useEffect(() => {
     if (!mapReady || !mapRef.current || !activeId) return;
-    const loc = locations.find((l) => l.id === activeId);
+    const loc = locs.find((l) => l.id === activeId);
     if (!loc || !isValidCoord(loc.lat, loc.lng)) return;
 
     const map = mapRef.current;
@@ -717,12 +959,12 @@ export default function Map({
         easing:  (t) => t < 0.5 ? 2 * t * t : -1 + (4 - 2 * t) * t,
       });
     }
-  }, [activeId, locations, mapReady]);
+  }, [activeId, locs, mapReady]);
 
   /* ── Fit bounds only when the location set changes (e.g. new day); never on deselect ── */
   useEffect(() => {
     if (!mapReady || !mapRef.current) return;
-    const valid = locations.filter((l) => isValidCoord(l.lat, l.lng));
+    const valid = locs.filter((l) => isValidCoord(l.lat, l.lng));
     if (valid.length === 0) return;
 
     const locationsKey = valid.map((l) => l.id).filter(Boolean).sort().join(',') || valid.length;
@@ -751,7 +993,7 @@ export default function Map({
     }, 200);
 
     return () => clearTimeout(t);
-  }, [locations, mapReady]);
+  }, [locs, mapReady]);
 
   if (error) {
     return (
@@ -765,8 +1007,9 @@ export default function Map({
   }
 
   return (
-    <div className={`relative rounded-2xl overflow-hidden ${className}`}>
-      <div ref={mapContainer} className="w-full h-full" />
+    <div className={`relative rounded-2xl overflow-hidden ${className}`} style={{ minHeight: 500, height: '100%' }}>
+      {/* height: 100% ensures Mapbox reads a non-zero clientHeight on init */}
+      <div ref={mapContainer} className="absolute inset-0 w-full" style={{ minHeight: 500, height: '100%' }} />
 
       {/* Loading overlay */}
       {!mapReady && (
@@ -778,9 +1021,9 @@ export default function Map({
         </div>
       )}
 
-      {/* Map style toggle: Street / Dark; Heatmap (dark only) */}
+      {/* Map style toggle: Street / Dark */}
       {mapReady && (
-        <div className="absolute top-3 right-3 flex items-center gap-2 z-10">
+        <div className="absolute top-3 right-3 z-10">
           <div className="flex rounded-lg bg-black/50 backdrop-blur-sm p-0.5 border border-white/10">
             <button
               type="button"
@@ -797,15 +1040,43 @@ export default function Map({
               Dark
             </button>
           </div>
-          {viewMode === 'dark' && (
-            <button
-              type="button"
-              onClick={() => setShowHeatmap((v) => !v)}
-              className={`px-2.5 py-1 text-xs font-medium rounded-lg border border-white/10 transition-colors ${showHeatmap ? 'bg-amber-500/40 text-white' : 'bg-black/50 text-slate-400 hover:text-slate-300 backdrop-blur-sm'}`}
-              title="Show popular areas (restaurants, cafés, attractions)"
-            >
-              Heatmap
-            </button>
+        </div>
+      )}
+
+      {/* Heatmap toggle + filter chips — bottom-right, above nav controls */}
+      {mapReady && (
+        <div className="absolute bottom-14 right-3 z-10 flex flex-col items-end gap-1.5">
+          <button
+            type="button"
+            onClick={() => setShowHeatmap((v) => !v)}
+            className={`flex items-center gap-1.5 px-3 py-1.5 text-xs font-medium rounded-xl border transition-colors ${showHeatmap ? 'bg-amber-500/40 text-amber-200 border-amber-400/50' : 'bg-black/50 backdrop-blur-sm text-slate-400 hover:text-slate-300 border-white/10'}`}
+            title="Show popular areas heatmap"
+          >
+            🔥 Heatmap
+          </button>
+          {showHeatmap && (
+            <div className="flex flex-wrap justify-end gap-1 max-w-[220px]">
+              {[
+                { key: 'food',        label: '🍽 Food'      },
+                { key: 'sightseeing', label: '👁 Sights'    },
+                { key: 'nightlife',   label: '🎵 Nightlife' },
+                { key: 'cultural',    label: '🏛 Culture'   },
+                { key: 'shopping',    label: '🛍 Shopping'  },
+                { key: 'scenic',      label: '🌿 Scenic'    },
+              ].map(({ key, label }) => {
+                const on = heatmapFilters.includes(key);
+                return (
+                  <button
+                    key={key}
+                    type="button"
+                    onClick={() => setHeatmapFilters((f) => on ? f.filter((x) => x !== key) : [...f, key])}
+                    className={`px-2 py-0.5 text-[10px] font-medium rounded border transition-colors ${on ? 'bg-amber-500/50 text-amber-100 border-amber-400/50' : 'bg-black/40 text-slate-400 border-white/10 hover:text-slate-300'}`}
+                  >
+                    {label}
+                  </button>
+                );
+              })}
+            </div>
           )}
         </div>
       )}

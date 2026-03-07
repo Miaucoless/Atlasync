@@ -2,6 +2,11 @@
 const nextConfig = {
   reactStrictMode: false,
 
+  // Expose Mapbox token to the client (must match .env.local)
+  env: {
+    NEXT_PUBLIC_MAPBOX_TOKEN: process.env.NEXT_PUBLIC_MAPBOX_TOKEN,
+  },
+
   // Allow Mapbox GL to be imported correctly on the client
   webpack: (config, { isServer }) => {
     if (!isServer) {

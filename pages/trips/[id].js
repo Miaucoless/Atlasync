@@ -650,6 +650,8 @@ export default function TripDetailPage() {
   const [optProgress,    setOptProgress]    = useState(0);
   const [optimisedRoute, setOptimisedRoute] = useState(null);
   const [routeGeoJSON,   setRouteGeoJSON]   = useState(null);
+  const [dayRouteGeoJSON, setDayRouteGeoJSON] = useState(null);
+  const [dayRouteLoading, setDayRouteLoading] = useState(false);
   const [offlineMode,    setOfflineMode]    = useState(false);
   const [editing,        setEditing]        = useState(false);
   const [editName,       setEditName]       = useState('');
@@ -704,11 +706,30 @@ export default function TripDetailPage() {
   );
 
   const [mapDayFilter, setMapDayFilter] = useState(null);
+  const [categoryChips, setCategoryChips] = useState([]);
   useEffect(() => {
     if (daysSorted.length > 0 && mapDayFilter == null) {
       setMapDayFilter(daysSorted[0].day_number ?? null);
     }
   }, [daysSorted, mapDayFilter]);
+
+  const CATEGORY_CHIPS = [
+    { key: 'food',        label: '🍽 Food',        types: ['restaurant'] },
+    { key: 'coffee',      label: '☕ Coffee',      types: ['restaurant'] },
+    { key: 'bars',        label: '🍸 Bars',        types: ['restaurant'] },
+    { key: 'museums',     label: '🏛 Museums',     types: ['attraction'] },
+    { key: 'attractions', label: '🎭 Attractions', types: ['attraction'] },
+    { key: 'parks',       label: '🌳 Parks',       types: ['activity']   },
+    { key: 'shopping',    label: '🛍 Shopping',    types: ['activity']   },
+  ];
+  const activeCategoryFilters = useMemo(() => {
+    if (categoryChips.length === 0) return null;
+    const types = [...new Set(categoryChips.flatMap((k) => CATEGORY_CHIPS.find((c) => c.key === k)?.types ?? []))];
+    return types.length ? types : null;
+  }, [categoryChips]);
+  const toggleCategoryChip = (key) => {
+    setCategoryChips((prev) => (prev.includes(key) ? prev.filter((k) => k !== key) : [...prev, key]));
+  };
 
   /* Optimise with animated progress */
   async function handleOptimise() {
@@ -741,6 +762,36 @@ export default function TripDetailPage() {
   function clearOptimisation() {
     setOptimisedRoute(null);
     setRouteGeoJSON(null);
+  }
+
+  async function handleRouteThisDay() {
+    const locs = mapLocations.filter((l) => Number.isFinite(l.lat) && Number.isFinite(l.lng));
+    if (locs.length < 2) return;
+    setDayRouteLoading(true);
+    try {
+      // coords must be {lat, lng} objects — /api/routes/optimize expects that format
+      const coords = locs.map((l) => ({ lat: l.lat, lng: l.lng }));
+      const res = await fetch('/api/routes/optimize', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ mode: 'drive', coords }),
+      });
+      const data = await res.json();
+      if (data.geometry && data.geometry.coordinates?.length >= 2) {
+        setDayRouteGeoJSON({
+          type: 'FeatureCollection',
+          features: [{ type: 'Feature', geometry: data.geometry, properties: {} }],
+        });
+      }
+    } catch (e) {
+      console.error(e);
+    } finally {
+      setDayRouteLoading(false);
+    }
+  }
+
+  function clearDayRoute() {
+    setDayRouteGeoJSON(null);
   }
 
   async function handleApplyItinerary(itinerary) {
@@ -1043,6 +1094,20 @@ export default function TripDetailPage() {
                 </button>
               )}
 
+              {mapLocations.length >= 2 && (
+                <button
+                  onClick={dayRouteGeoJSON ? clearDayRoute : handleRouteThisDay}
+                  disabled={dayRouteLoading}
+                  className={`hidden sm:flex items-center gap-1.5 btn-ghost text-xs py-1.5 px-3 ${
+                    dayRouteGeoJSON ? 'border-emerald-500/30 text-emerald-400' : ''
+                  }`}
+                  title={dayRouteGeoJSON ? 'Clear route' : 'Route this day'}
+                >
+                  <RouteIcon />
+                  <span>{dayRouteLoading ? 'Routing…' : dayRouteGeoJSON ? 'Clear route' : 'Route this day'}</span>
+                </button>
+              )}
+
               {/* Mobile optimize icon-only */}
               {allLocations.length >= 2 && (
                 <button
@@ -1054,6 +1119,19 @@ export default function TripDetailPage() {
                       : 'text-atlas-text-muted hover:text-white hover:bg-white/[0.06]'
                   }`}
                   title={optimisedRoute ? 'Clear route' : 'Optimise route'}
+                >
+                  <RouteIcon />
+                </button>
+              )}
+
+              {mapLocations.length >= 2 && (
+                <button
+                  onClick={dayRouteGeoJSON ? clearDayRoute : handleRouteThisDay}
+                  disabled={dayRouteLoading}
+                  className={`sm:hidden p-2 rounded-xl transition-all ${
+                    dayRouteGeoJSON ? 'bg-emerald-500/15 text-emerald-400' : 'text-atlas-text-muted hover:text-white hover:bg-white/[0.06]'
+                  }`}
+                  title={dayRouteGeoJSON ? 'Clear route' : 'Route this day'}
                 >
                   <RouteIcon />
                 </button>
@@ -1151,36 +1229,66 @@ export default function TripDetailPage() {
               )}
             </div>
 
-            {/* ── Right: Map ──────────────────────────────────── */}
-            <div className="relative flex-1 min-h-[500px] lg:min-h-0 lg:h-[calc(100vh-160px)] lg:sticky lg:top-[130px]">
+            {/* ── Right: Map (scroll down on small screens) ─────── */}
+            <div className="relative flex-1 min-w-0 lg:min-w-[380px] h-[500px] lg:h-[calc(100vh-160px)] lg:sticky lg:top-[130px]">
               {daysSorted.length > 0 && (
-                <div className="absolute top-4 left-4 right-4 z-10 flex flex-wrap gap-1.5">
-                  {daysSorted.map((d) => (
+                <div className="absolute top-4 left-4 right-4 z-10 flex flex-col gap-2">
+                  <div className="flex flex-wrap gap-1.5">
+                    {daysSorted.map((d) => (
+                      <button
+                        key={d.id}
+                        type="button"
+                        onClick={() => {
+                          setMapDayFilter(d.day_number ?? null);
+                          setExpandedDays({ [d.id]: true });
+                          setTimeout(() => {
+                            const el = dayCardRefs.current[d.id];
+                            if (el) el.scrollIntoView({ behavior: 'smooth', block: 'nearest' });
+                          }, 80);
+                        }}
+                        className={`px-2.5 py-1.5 rounded-lg text-xs font-medium transition-all ${
+                          mapDayFilter === (d.day_number ?? null)
+                            ? 'bg-atlas-blue/90 text-white shadow-md'
+                            : 'glass text-atlas-text-secondary hover:text-white hover:bg-white/10'
+                        }`}
+                      >
+                        Day {d.day_number ?? '?'}
+                      </button>
+                    ))}
+                  </div>
+                  <div className="flex flex-wrap gap-1.5">
+                    {/* "All" chip — clears all filters */}
                     <button
-                      key={d.id}
                       type="button"
-                      onClick={() => {
-                        setMapDayFilter(d.day_number ?? null);
-                        setExpandedDays({ [d.id]: true });
-                        setTimeout(() => {
-                          const el = dayCardRefs.current[d.id];
-                          if (el) el.scrollIntoView({ behavior: 'smooth', block: 'nearest' });
-                        }, 80);
-                      }}
-                      className={`px-2.5 py-1.5 rounded-lg text-xs font-medium transition-all ${
-                        mapDayFilter === (d.day_number ?? null)
-                          ? 'bg-atlas-blue/90 text-white shadow-md'
-                          : 'glass text-atlas-text-secondary hover:text-white hover:bg-white/10'
+                      onClick={() => setCategoryChips([])}
+                      className={`px-2 py-1 rounded-md text-[11px] font-medium transition-all ${
+                        categoryChips.length === 0 ? 'bg-atlas-blue/70 text-white' : 'glass text-atlas-text-muted hover:text-atlas-text-secondary'
                       }`}
                     >
-                      Day {d.day_number ?? '?'}
+                      All
                     </button>
-                  ))}
+                    {CATEGORY_CHIPS.map((c) => {
+                      const on = categoryChips.includes(c.key);
+                      return (
+                        <button
+                          key={c.key}
+                          type="button"
+                          onClick={() => toggleCategoryChip(c.key)}
+                          className={`px-2 py-1 rounded-md text-[11px] font-medium transition-all ${
+                            on ? 'bg-emerald-500/80 text-white' : 'glass text-atlas-text-muted hover:text-atlas-text-secondary'
+                          }`}
+                        >
+                          {c.label}
+                        </button>
+                      );
+                    })}
+                  </div>
                 </div>
               )}
               <MapView
                 locations={mapLocations}
                 routeGeoJSON={routeGeoJSON}
+                dayRouteGeoJSON={dayRouteGeoJSON}
                 activeId={activeLocId}
                 onMarkerClick={(loc) => {
                   setActiveLocId(loc.id === activeLocId ? null : loc.id);
@@ -1190,14 +1298,15 @@ export default function TripDetailPage() {
                 onMapClick={() => setActiveLocId(null)}
                 days={daysSorted}
                 onAddLocationToDay={handleAddLocationFromMap}
-                className="w-full h-full"
+                activeCategoryFilters={activeCategoryFilters}
+                className="w-full h-full min-h-[500px]"
                 initialCenter={mapInitialCenter}
                 initialZoom={allLocations.length > 0 ? 11 : 2}
               />
 
               {/* Location count overlay */}
               {mapLocations.length > 0 && (
-                <div className="absolute top-4 left-4 glass px-3 py-1.5 rounded-xl text-xs text-atlas-text-secondary pointer-events-none"
+                <div className="absolute bottom-4 left-4 glass px-3 py-1.5 rounded-xl text-xs text-atlas-text-secondary pointer-events-none"
                   style={{ animation: 'fade-in 0.5s 300ms both' }}>
                   {mapLocations.length} location{mapLocations.length !== 1 ? 's' : ''}
                   {optimisedRoute && <span className="text-emerald-400 ml-1.5">· optimised</span>}

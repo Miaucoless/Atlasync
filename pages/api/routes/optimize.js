@@ -1,41 +1,27 @@
-/**
- * pages/api/routes/optimize.js
- * POST /api/routes/optimize
- *
- * Body: { locations: [{ id, name, lat, lng }], options?: { twoOptEnabled } }
- * Returns: { orderedLocations, totalDistanceKm, routeIndices }
- *
- * This endpoint runs the same offline algorithm as routeOptimizer.js
- * so it can also be called server-side or from native apps.
- */
-
-import {
-  optimizeRoute,
-  buildDistanceMatrix,
-} from '../../../utils/routeOptimizer';
-
-export default function handler(req, res) {
+export default async function handler(req, res) {
   if (req.method !== 'POST') {
-    return res.status(405).json({ error: 'Method not allowed. Use POST.' });
-  }
-
-  const { locations, options = {} } = req.body;
-
-  if (!Array.isArray(locations)) {
-    return res.status(400).json({ error: '`locations` must be an array.' });
-  }
-  if (locations.length === 0) {
-    return res.status(200).json({ orderedLocations: [], totalDistanceKm: 0, routeIndices: [] });
+    return res.status(405).json({ error: 'Method Not Allowed' });
   }
 
   try {
-    const result = optimizeRoute(locations, {
-      twoOptEnabled: options.twoOptEnabled !== false, // default true
-      startIndex:    options.startIndex    ?? 0,
+    const { coords, mode = 'drive' } = req.body;
+    const key = process.env.GEOAPIFY_API_KEY;
+
+    const waypoints = coords.map(c => `${c.lat},${c.lng}`).join('|');
+
+    const url = `https://api.geoapify.com/v1/routing?waypoints=${waypoints}&mode=${mode}&apiKey=${key}`;
+    const r = await fetch(url);
+    const data = await r.json();
+
+    const feature = data.features?.[0];
+    return res.status(200).json({
+      geometry: feature.geometry,
+      summary: {
+        distance_m: feature.properties.distance,
+        duration_s: feature.properties.time
+      }
     });
-    return res.status(200).json(result);
   } catch (err) {
-    console.error('[optimize]', err);
-    return res.status(500).json({ error: err.message || 'Optimisation failed.' });
+    res.status(500).json({ error: 'Routing failed' });
   }
 }

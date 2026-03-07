@@ -110,7 +110,8 @@ export default function WorldGlobe({
     flyProgress:   1,
   });
 
-  const [tooltip, setTooltip] = useState({ visible: false, x: 0, y: 0, text: '', time: '' });
+  const [tooltip, setTooltip]         = useState({ visible: false, x: 0, y: 0, text: '', time: '' });
+  const [textureLoaded, setTextureLoaded] = useState(false);
 
   const flyTo = useCallback((lat, lng) => {
     const phi   = (90 - lat)   * (Math.PI / 180);
@@ -153,37 +154,25 @@ export default function WorldGlobe({
     accent.position.set(3, 5, -3);
     scene.add(accent);
 
-    /* ── Globe texture ── */
+    /* ── Globe ── */
     const GLOBE_R = 1;
-    const tx = document.createElement('canvas');
-    tx.width = 2048; tx.height = 1024;
-    const ctx = tx.getContext('2d');
-
-    const grad = ctx.createLinearGradient(0, 0, 0, tx.height);
-    grad.addColorStop(0, '#030b20'); grad.addColorStop(0.5, '#051230'); grad.addColorStop(1, '#030b20');
-    ctx.fillStyle = grad; ctx.fillRect(0, 0, tx.width, tx.height);
-
-    ctx.strokeStyle = 'rgba(59,130,246,0.09)'; ctx.lineWidth = 0.4;
-    for (let lat = -90; lat <= 90; lat += 10) {
-      const y = ((90 - lat) / 180) * tx.height;
-      ctx.beginPath(); ctx.moveTo(0, y); ctx.lineTo(tx.width, y); ctx.stroke();
-    }
-    for (let lng = -180; lng <= 180; lng += 10) {
-      const x = ((lng + 180) / 360) * tx.width;
-      ctx.beginPath(); ctx.moveTo(x, 0); ctx.lineTo(x, tx.height); ctx.stroke();
-    }
-    ctx.strokeStyle = 'rgba(59,130,246,0.24)'; ctx.lineWidth = 1;
-    ctx.beginPath(); ctx.moveTo(0, tx.height/2); ctx.lineTo(tx.width, tx.height/2); ctx.stroke();
-    ctx.beginPath(); ctx.moveTo(tx.width/2, 0); ctx.lineTo(tx.width/2, tx.height); ctx.stroke();
-    ctx.strokeStyle = 'rgba(139,92,246,0.09)';
-    [23.5, -23.5, 66.5, -66.5].forEach((lat) => {
-      const y = ((90 - lat) / 180) * tx.height;
-      ctx.beginPath(); ctx.moveTo(0, y); ctx.lineTo(tx.width, y); ctx.stroke();
+    const loadTex = (url) => new Promise(resolve => {
+      new THREE.TextureLoader().load(url, resolve, undefined, () => resolve(null));
     });
-
-    const globeTex = new THREE.CanvasTexture(tx);
-    const globeMat = new THREE.MeshPhongMaterial({ map: globeTex, specular: new THREE.Color(0x1a3a6e), shininess: 18 });
+    const [earthMap, earthSpec, earthNorm] = await Promise.all([
+      loadTex('https://threejs.org/examples/textures/planets/earth_atmos_2048.jpg'),
+      loadTex('https://threejs.org/examples/textures/planets/earth_specular_2048.jpg'),
+      loadTex('https://threejs.org/examples/textures/planets/earth_normal_2048.jpg'),
+    ]);
+    const globeMat = new THREE.MeshPhongMaterial({
+      map:       earthMap,
+      ...(earthSpec ? { specularMap: earthSpec } : { specular: new THREE.Color(0x1a3a6e) }),
+      ...(earthNorm ? { normalMap: earthNorm, normalScale: new THREE.Vector2(0.5, 0.5) } : {}),
+      shininess: 25,
+    });
     const globeMesh = new THREE.Mesh(new THREE.SphereGeometry(GLOBE_R, 72, 72), globeMat);
+    // Signal parent that texture has loaded (fade-in handled via state)
+    mount._onTextureLoad?.();
 
     /* ── Atmosphere ── */
     const atmo1 = new THREE.Mesh(
@@ -200,7 +189,7 @@ export default function WorldGlobe({
     );
 
     /* ── Equatorial ring ── */
-    const ringMat = new THREE.MeshBasicMaterial({ color: 0x3b82f6, transparent: true, opacity: 0.28 });
+    const ringMat = new THREE.MeshBasicMaterial({ color: 0x3b82f6, transparent: true, opacity: 0.12 });
     const equatorRing = new THREE.Mesh(new THREE.TorusGeometry(GLOBE_R * 1.015, 0.003, 8, 128), ringMat);
 
     /* ── Shadow disc ── */
@@ -248,8 +237,8 @@ export default function WorldGlobe({
       const posUp  = latLngToXYZ(m.lat, m.lng, GLOBE_R + 0.042);
       const normal = new THREE.Vector3(pos.x, pos.y, pos.z).normalize();
 
-      // Visible orb
-      const dotGeo = new THREE.SphereGeometry(0.013, 16, 16);
+      // Visible orb (slightly smaller for less clutter)
+      const dotGeo = new THREE.SphereGeometry(0.010, 16, 16);
       const dotMat = new THREE.MeshBasicMaterial({ color: c });
       const dot    = new THREE.Mesh(dotGeo, dotMat);
       dot.position.set(posUp.x, posUp.y, posUp.z);
@@ -275,15 +264,16 @@ export default function WorldGlobe({
       spike.quaternion.setFromUnitVectors(new THREE.Vector3(0, 1, 0), normal);
       markerGroup.add(spike);
 
-      // Pulsing rings
+      // Rings — hidden by default, shown only for hovered/selected cities
       const phase = Math.random() * Math.PI * 2;
       const makeRing = (inner, outer, ph) => {
-        const rMat = new THREE.MeshBasicMaterial({ color: c, side: THREE.DoubleSide, transparent: true, opacity: 0.5 });
+        const rMat = new THREE.MeshBasicMaterial({ color: c, side: THREE.DoubleSide, transparent: true, opacity: 0 });
         const r    = new THREE.Mesh(new THREE.RingGeometry(inner, outer, 32), rMat);
         r.position.set(posUp.x, posUp.y, posUp.z);
         r.lookAt(0, 0, 0);
         r._phase  = ph;
         r._isRing = true;
+        r.visible = false;   // hidden until hover/select
         markerGroup.add(r);
         return r;
       };
@@ -408,7 +398,7 @@ export default function WorldGlobe({
 
       /* Fly-to interpolation */
       if (s.flyTarget && s.flyProgress < 1) {
-        s.flyProgress = Math.min(s.flyProgress + 0.025, 1);
+        s.flyProgress = Math.min(s.flyProgress + 0.014, 1);
         const ease = 1 - Math.pow(1 - s.flyProgress, 3);
         s.targetRotX = s.rotX + (s.flyTarget.rotX - s.rotX) * ease;
         s.targetRotY = s.rotY + (s.flyTarget.rotY - s.rotY) * ease;
@@ -457,42 +447,33 @@ export default function WorldGlobe({
         }
       }
 
-      /* Update marker colors/opacity based on mode + continent filter */
+      /* Update marker colors, opacity, and ring visibility per frame */
       markerData.forEach((md, idx) => {
-        const m         = md.marker;
-        const isSelected = idx === liveProps.selectedIdx;
+        const m           = md.marker;
+        const isSelected  = idx === liveProps.selectedIdx;
+        const isHovered   = idx === lastHoveredIdx;
         const inContinent = liveProps.activeContinent === 'All' || m.continent === liveProps.activeContinent;
-        const targetOpacity = inContinent ? 1 : 0.15;
-        const color = new THREE.Color(getMarkerColor(m, liveProps.mode));
+        const tOp         = inContinent ? 1 : 0.15;
+        const color       = new THREE.Color(getMarkerColor(m, liveProps.mode));
 
         md.dotMat.color.set(color);
-        md.spikeMat.opacity = 0.7 * targetOpacity;
         md.ring1Mat.color.set(color);
         md.ring2Mat.color.set(color);
+        md.spikeMat.opacity = 0.7 * tOp;
 
         if (isSelected) {
           md.dotMesh.scale.setScalar(2.8);
-          md.ring1Mat.opacity = 0.9 * targetOpacity;
-          md.ring2Mat.opacity = 0.7 * targetOpacity;
-        } else if (idx === lastHoveredIdx) {
-          // keep hover scale
+          md.ring1.visible = true; md.ring2.visible = true;
+          const pulse = 1 + 0.3 * Math.abs(Math.sin(t * 1.6 + md.dotMesh._phase));
+          md.ring1.scale.setScalar(pulse); md.ring2.scale.setScalar(pulse * 1.15);
+          md.ring1Mat.opacity = 0.9 * tOp; md.ring2Mat.opacity = 0.7 * tOp;
+        } else if (isHovered) {
+          md.ring1.visible = true; md.ring2.visible = false;
+          md.ring1.scale.setScalar(1.4); md.ring1Mat.opacity = 0.7;
+          // hover dot scale handled by the raycasting block above
         } else {
+          md.ring1.visible = false; md.ring2.visible = false;
           md.dotMesh.scale.setScalar(inContinent ? 1 : 0.7);
-        }
-      });
-
-      /* Pulse rings */
-      markerGroup.children.forEach((child) => {
-        if (!child._isRing) return;
-        const ownerIdx = markerData.findIndex(md => md.ring1 === child || md.ring2 === child);
-        if (ownerIdx === liveProps.selectedIdx) {
-          // Selected: steady bright ring
-          child.scale.setScalar(1.4);
-          child.material.opacity = 0.8;
-        } else {
-          const s2 = 1 + 0.55 * Math.abs(Math.sin(t * 1.6 + child._phase));
-          child.scale.setScalar(s2);
-          child.material.opacity = 0.5 * (1 - Math.abs(Math.sin(t * 1.6 + child._phase)) * 0.75);
         }
       });
 
@@ -545,6 +526,8 @@ export default function WorldGlobe({
 
   const [globeError, setGlobeError] = useState(false);
   useEffect(() => {
+    // Wire up texture-loaded callback before initGlobe runs
+    if (mountRef.current) mountRef.current._onTextureLoad = () => setTextureLoaded(true);
     let cleanup;
     initGlobe()
       .then((fn) => { cleanup = fn; })
@@ -566,11 +549,22 @@ export default function WorldGlobe({
   }
 
   return (
-    <div
-      ref={mountRef}
-      className={`relative w-full h-full cursor-grab active:cursor-grabbing select-none ${className}`}
-      style={{ touchAction: 'none' }}
-    >
+    <div className={`relative w-full h-full ${className}`}>
+      {/* Loading spinner — shown while Earth texture downloads */}
+      {!textureLoaded && (
+        <div className="absolute inset-0 flex items-center justify-center z-10 pointer-events-none">
+          <div className="flex flex-col items-center gap-3">
+            <div className="w-10 h-10 border-2 border-atlas-blue border-t-transparent rounded-full animate-spin"/>
+            <p className="text-xs text-atlas-text-muted">Loading Earth…</p>
+          </div>
+        </div>
+      )}
+
+      <div
+        ref={mountRef}
+        className="absolute inset-0 cursor-grab active:cursor-grabbing select-none"
+        style={{ touchAction: 'none', opacity: textureLoaded ? 1 : 0, transition: 'opacity 0.6s ease' }}
+      >
       {tooltip.visible && tooltip.text && (
         <div
           className="fixed pointer-events-none z-50 px-3 py-2 rounded-xl text-xs font-bold text-white whitespace-nowrap"
@@ -590,6 +584,7 @@ export default function WorldGlobe({
           />
         </div>
       )}
+      </div>
     </div>
   );
 }
