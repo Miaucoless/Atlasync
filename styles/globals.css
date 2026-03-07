@@ -280,6 +280,22 @@ body {
     font-size:   13px !important;
     color:       #94A3B8 !important;
   }
+
+  /* Map popups (pin + place): easy-to-read descriptions */
+  .mapboxgl-popup.atlas-map-popup .mapboxgl-popup-content {
+    padding:       16px 18px;
+    background:    rgba(12, 16, 28, 0.97);
+    border-radius: 12px;
+    min-width:     220px;
+    max-width:     320px;
+  }
+  .mapboxgl-popup.atlas-map-popup .atlas-popup-desc {
+    font-size:     15px !important;
+    font-weight:   400 !important;
+    color:         #F1F5F9 !important;
+    line-height:   1.65 !important;
+    letter-spacing: 0.02em !important;
+  }
 }
 
 /* ══════════════════════════════════════════════════════════════════

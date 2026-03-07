@@ -18,14 +18,14 @@ import Link from 'next/link';
 import TripDayCard from '../../components/TripDayCard';
 import AIChat      from '../../components/AIChat';
 import {
-  supabase, fetchTrip, updateTrip, deleteTrip, upsertLocations, deleteLocation, insertTripDays,
+  supabase, fetchTrip, updateTrip, deleteTrip, upsertLocations, deleteLocation, deleteLocationsByDayIds, insertTripDays,
 } from '../../utils/supabaseClient';
 import {
   optimizeRoute, routeToGeoJSON,
 } from '../../utils/routeOptimizer';
 import { getCachedTrip, cacheTrip, removeCachedTrip, isOnline } from '../../utils/offlineCache';
 
-const Map = dynamic(() => import('../../components/Map'), { ssr: false });
+const MapView = dynamic(() => import('../../components/Map'), { ssr: false });
 
 /* ── Google Maps URL parser ─────────────────────────────────────────── */
 /**
@@ -274,12 +274,27 @@ function OptimiseProgress({ progress }) {
 }
 
 /* ── AI Itinerary Generator modal ───────────────────────────────────── */
+const INTEREST_OPTIONS = ['Culture', 'Food & drink', 'Nature', 'Photography', 'Nightlife', 'History', 'Shopping', 'Adventure', 'Relaxation'];
+const PACE_OPTIONS = [
+  { value: 'relaxed', label: 'Relaxed', desc: '~3 stops/day' },
+  { value: 'balanced', label: 'Balanced', desc: '~4 stops/day' },
+  { value: 'packed', label: 'Packed', desc: '~6 stops/day' },
+];
+
 function AIItineraryModal({ trip, onClose, onApply }) {
   const [destination, setDestination] = useState('');
   const [numDays, setNumDays] = useState(3);
   const [pace, setPace] = useState('balanced');
+  const [startDate, setStartDate] = useState('');
+  const [interests, setInterests] = useState([]);
   const [userIdeas, setUserIdeas] = useState('');
+  const [mapsListUrl, setMapsListUrl] = useState('');
+  const [placesFromLink, setPlacesFromLink] = useState([]);
+  const [loadingLink, setLoadingLink] = useState(false);
+  const [linkError, setLinkError] = useState(null);
+  const [pastedPlaces, setPastedPlaces] = useState('');
   const [generating, setGenerating] = useState(false);
+  const [genProgress, setGenProgress] = useState(0);
   const [error, setError] = useState(null);
   const [result, setResult] = useState(null);
   const [applying, setApplying] = useState(false);
@@ -289,12 +304,56 @@ function AIItineraryModal({ trip, onClose, onApply }) {
     if (trip?.destinations?.[0]) setDestination((d) => d || trip.destinations[0]);
   }, [trip?.name, trip?.destinations]);
 
+  function toggleInterest(tag) {
+    setInterests((prev) =>
+      prev.includes(tag) ? prev.filter((t) => t !== tag) : [...prev, tag]
+    );
+  }
+
+  async function handleLoadMapsList() {
+    const url = mapsListUrl.trim();
+    if (!url) return setLinkError('Paste a Google Maps list or place link first.');
+    setLoadingLink(true);
+    setLinkError(null);
+    setPlacesFromLink([]);
+    try {
+      const res = await fetch('/api/places/parse-google-maps-link', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ url }),
+      });
+      const data = await res.json();
+      if (data.error) {
+        setLinkError(data.error);
+        return;
+      }
+      const list = Array.isArray(data.places) ? data.places : [];
+      setPlacesFromLink(list);
+      if (list.length === 0) setLinkError('No places found. Paste place names below (one per line) instead.');
+    } catch (err) {
+      setLinkError('Could not load that link. Try pasting place names below.');
+    } finally {
+      setLoadingLink(false);
+    }
+  }
+
   async function handleGenerate(e) {
     e.preventDefault();
     if (!destination?.trim()) return setError('Destination is required.');
     setGenerating(true);
+    setGenProgress(0);
     setError(null);
     setResult(null);
+    const steps = [8, 18, 28, 40, 52, 65, 78, 88];
+    let si = 0;
+    const progressInterval = setInterval(() => {
+      if (si < steps.length) setGenProgress(steps[si++]);
+      else clearInterval(progressInterval);
+    }, 800);
+    const existingPlacesWithCoords = placesFromLink.filter((p) => Number.isFinite(p.lat) && Number.isFinite(p.lng)).map((p) => ({ name: p.name || 'Place', lat: p.lat, lng: p.lng }));
+    const existingLocationsStr = pastedPlaces.trim()
+      ? pastedPlaces.trim().split(/\n+/).map((s) => s.trim()).filter(Boolean).join('\n')
+      : undefined;
     try {
       const res = await fetch('/api/ai/itinerary', {
         method: 'POST',
@@ -303,15 +362,22 @@ function AIItineraryModal({ trip, onClose, onApply }) {
           destination: destination.trim(),
           numDays: Math.max(1, Math.min(14, Number(numDays) || 3)),
           pace: pace || 'balanced',
-          interests: [],
+          interests: interests.length ? interests : undefined,
+          startDate: startDate || undefined,
           userIdeas: userIdeas.trim() || undefined,
+          existingLocations: existingLocationsStr,
+          existingPlacesWithCoords: existingPlacesWithCoords.length > 0 ? existingPlacesWithCoords : undefined,
         }),
       });
       const data = await res.json();
+      clearInterval(progressInterval);
+      setGenProgress(100);
       if (!res.ok) throw new Error(data.error || 'Failed to generate itinerary');
       if (!Array.isArray(data?.days)) throw new Error('Invalid response from AI');
       setResult(data);
     } catch (err) {
+      clearInterval(progressInterval);
+      setGenProgress(0);
       setError(err.message || 'Failed to generate itinerary.');
     } finally {
       setGenerating(false);
@@ -332,83 +398,235 @@ function AIItineraryModal({ trip, onClose, onApply }) {
     }
   }
 
+  const totalStops = result?.days?.reduce((n, d) => n + (d.locations?.length ?? 0), 0) ?? 0;
+  const hasRecs = Array.isArray(result?.recommended_additions) && result.recommended_additions.length > 0;
+
   return (
     <div className="fixed inset-0 z-50 flex items-center justify-center p-4">
-      <div className="absolute inset-0 bg-black/60 backdrop-blur-sm" onClick={onClose} />
+      <div className="absolute inset-0 bg-black/70 backdrop-blur-md" onClick={onClose} />
       <div
-        className="relative glass-heavy rounded-2xl w-full max-w-lg max-h-[90vh] overflow-hidden flex flex-col shadow-card"
-        style={{ animation: 'slide-up 0.3s ease both' }}
+        className="relative w-full max-w-xl max-h-[92vh] overflow-hidden flex flex-col rounded-2xl border border-white/[0.08] shadow-2xl"
+        style={{
+          background: 'linear-gradient(180deg, rgba(15,23,42,0.97) 0%, rgba(8,12,24,0.98) 100%)',
+          animation: 'slide-up 0.3s ease both',
+        }}
       >
-        <div className="flex items-center justify-between p-4 border-b border-white/[0.06] flex-shrink-0">
-          <h2 className="text-base font-bold text-white">Generate with AI</h2>
-          <button type="button" onClick={onClose} className="p-1.5 rounded-lg text-atlas-text-muted hover:text-white hover:bg-white/[0.06]">
+        {/* Header */}
+        <div className="flex-shrink-0 flex items-center justify-between px-5 py-4 border-b border-white/[0.06]">
+          <div className="flex items-center gap-2">
+            <span className="flex items-center justify-center w-9 h-9 rounded-xl bg-gradient-to-br from-blue-500/20 to-cyan-500/20 border border-white/10">
+              <SparkleIcon />
+            </span>
+            <div>
+              <h2 className="text-lg font-semibold text-white tracking-tight">AI Itinerary</h2>
+              <p className="text-xs text-slate-400">Generate a day-by-day plan</p>
+            </div>
+          </div>
+          <button
+            type="button"
+            onClick={onClose}
+            className="p-2 rounded-xl text-slate-400 hover:text-white hover:bg-white/[0.08] transition-colors"
+          >
             <XIcon />
           </button>
         </div>
-        <div className="p-4 overflow-y-auto flex-1 min-h-0 space-y-4">
-          {!result ? (
-            <form onSubmit={handleGenerate} className="space-y-4">
-              <div>
-                <label className="block text-xs font-medium text-atlas-text-muted mb-1.5">Destination</label>
-                <input
-                  type="text"
-                  value={destination}
-                  onChange={(e) => setDestination(e.target.value)}
-                  placeholder="e.g. Lisbon, Portugal"
-                  className="atlas-input w-full"
+
+        <div className="flex-1 overflow-y-auto min-h-0">
+          {generating ? (
+            <div className="p-5 flex flex-col items-center justify-center min-h-[280px]">
+              <p className="text-sm font-medium text-slate-300 mb-4">Generating your itinerary…</p>
+              <div className="w-full max-w-xs h-2 rounded-full bg-white/[0.08] overflow-hidden">
+                <div
+                  className="h-full bg-gradient-to-r from-blue-500 to-cyan-400 rounded-full transition-all duration-500 ease-out"
+                  style={{ width: `${genProgress}%` }}
                 />
               </div>
-              <div className="grid grid-cols-2 gap-3">
-                <div>
-                  <label className="block text-xs font-medium text-atlas-text-muted mb-1.5">Days</label>
-                  <input
-                    type="number"
-                    min={1}
-                    max={14}
-                    value={numDays}
-                    onChange={(e) => setNumDays(e.target.value)}
-                    className="atlas-input w-full"
-                  />
+              <p className="text-xs text-slate-500 mt-3">{genProgress}%</p>
+            </div>
+          ) : !result ? (
+            <form onSubmit={handleGenerate} className="p-5 space-y-5">
+              {/* Trip basics */}
+              <section>
+                <h3 className="text-xs font-semibold text-slate-400 uppercase tracking-wider mb-3">Trip basics</h3>
+                <div className="space-y-3">
+                  <div>
+                    <label className="block text-xs font-medium text-slate-400 mb-1.5">Destination</label>
+                    <input
+                      type="text"
+                      value={destination}
+                      onChange={(e) => setDestination(e.target.value)}
+                      placeholder="e.g. Lisbon, Portugal"
+                      className="w-full px-4 py-3 rounded-xl bg-white/[0.06] border border-white/[0.08] text-white placeholder-slate-500 focus:border-blue-500/50 focus:ring-1 focus:ring-blue-500/30 outline-none transition-all"
+                    />
+                  </div>
+                  <div className="grid grid-cols-2 gap-3">
+                    <div>
+                      <label className="block text-xs font-medium text-slate-400 mb-1.5">Number of days</label>
+                      <input
+                        type="number"
+                        min={1}
+                        max={14}
+                        value={numDays}
+                        onChange={(e) => setNumDays(e.target.value)}
+                        className="w-full px-4 py-3 rounded-xl bg-white/[0.06] border border-white/[0.08] text-white focus:border-blue-500/50 focus:ring-1 focus:ring-blue-500/30 outline-none transition-all"
+                      />
+                    </div>
+                    <div>
+                      <label className="block text-xs font-medium text-slate-400 mb-1.5">Start date (optional)</label>
+                      <input
+                        type="date"
+                        value={startDate}
+                        onChange={(e) => setStartDate(e.target.value)}
+                        className="w-full px-4 py-3 rounded-xl bg-white/[0.06] border border-white/[0.08] text-white focus:border-blue-500/50 focus:ring-1 focus:ring-blue-500/30 outline-none transition-all"
+                      />
+                    </div>
+                  </div>
                 </div>
-                <div>
-                  <label className="block text-xs font-medium text-atlas-text-muted mb-1.5">Pace</label>
-                  <select value={pace} onChange={(e) => setPace(e.target.value)} className="atlas-input w-full">
-                    <option value="relaxed">Relaxed</option>
-                    <option value="balanced">Balanced</option>
-                    <option value="packed">Packed</option>
-                  </select>
+              </section>
+
+              {/* Pace */}
+              <section>
+                <h3 className="text-xs font-semibold text-slate-400 uppercase tracking-wider mb-3">Pace</h3>
+                <div className="grid grid-cols-3 gap-2">
+                  {PACE_OPTIONS.map((opt) => (
+                    <button
+                      key={opt.value}
+                      type="button"
+                      onClick={() => setPace(opt.value)}
+                      className={`px-3 py-2.5 rounded-xl text-left border transition-all ${
+                        pace === opt.value
+                          ? 'bg-blue-500/15 border-blue-500/40 text-white'
+                          : 'bg-white/[0.04] border-white/[0.08] text-slate-400 hover:border-white/20 hover:text-slate-300'
+                      }`}
+                    >
+                      <span className="block text-sm font-medium">{opt.label}</span>
+                      <span className="block text-[10px] opacity-80">{opt.desc}</span>
+                    </button>
+                  ))}
                 </div>
-              </div>
-              <div>
-                <label className="block text-xs font-medium text-atlas-text-muted mb-1.5">Preferences (optional)</label>
+              </section>
+
+              {/* Interests */}
+              <section>
+                <h3 className="text-xs font-semibold text-slate-400 uppercase tracking-wider mb-3">Interests (optional)</h3>
+                <div className="flex flex-wrap gap-2">
+                  {INTEREST_OPTIONS.map((tag) => (
+                    <button
+                      key={tag}
+                      type="button"
+                      onClick={() => toggleInterest(tag)}
+                      className={`px-3 py-1.5 rounded-lg text-sm font-medium transition-all ${
+                        interests.includes(tag)
+                          ? 'bg-cyan-500/20 text-cyan-300 border border-cyan-500/30'
+                          : 'bg-white/[0.06] text-slate-400 border border-transparent hover:border-white/10 hover:text-slate-300'
+                      }`}
+                    >
+                      {tag}
+                    </button>
+                  ))}
+                </div>
+              </section>
+
+              {/* Preferences */}
+              <section>
+                <label className="block text-xs font-semibold text-slate-400 uppercase tracking-wider mb-2">Preferences (optional)</label>
                 <textarea
                   value={userIdeas}
                   onChange={(e) => setUserIdeas(e.target.value)}
-                  placeholder="e.g. focus on food, avoid crowds..."
+                  placeholder="e.g. focus on food, avoid crowds, kid-friendly..."
                   rows={2}
-                  className="atlas-input w-full resize-none"
+                  className="w-full px-4 py-3 rounded-xl bg-white/[0.06] border border-white/[0.08] text-white placeholder-slate-500 focus:border-blue-500/50 focus:ring-1 focus:ring-blue-500/30 outline-none resize-none transition-all"
                 />
-              </div>
-              {error && <p className="text-xs text-red-400 px-3 py-2 rounded-lg bg-red-500/10 border border-red-500/20">{error}</p>}
-              <button type="submit" disabled={generating} className="btn-glow w-full">
-                {generating ? 'Generating itinerary…' : 'Generate itinerary'}
+              </section>
+
+              {/* Places from Google Maps */}
+              <section className="space-y-3">
+                <h3 className="text-xs font-semibold text-slate-400 uppercase tracking-wider">Places to include</h3>
+                <p className="text-xs text-slate-500">Paste a Google Maps list or place link; we’ll include the best fits in your itinerary and suggest the rest on the map.</p>
+                <div className="flex gap-2">
+                  <input
+                    type="url"
+                    value={mapsListUrl}
+                    onChange={(e) => { setMapsListUrl(e.target.value); setLinkError(null); }}
+                    placeholder="https://maps.google.com/... or maps.app.goo.gl/..."
+                    className="flex-1 px-4 py-2.5 rounded-xl bg-white/[0.06] border border-white/[0.08] text-white placeholder-slate-500 text-sm focus:border-blue-500/50 focus:ring-1 focus:ring-blue-500/30 outline-none"
+                  />
+                  <button
+                    type="button"
+                    onClick={handleLoadMapsList}
+                    disabled={loadingLink || !mapsListUrl.trim()}
+                    className="px-4 py-2.5 rounded-xl font-medium text-sm bg-white/[0.08] border border-white/[0.1] text-slate-300 hover:bg-white/[0.12] disabled:opacity-50 disabled:pointer-events-none whitespace-nowrap"
+                  >
+                    {loadingLink ? 'Loading…' : 'Load list'}
+                  </button>
+                </div>
+                {linkError && <p className="text-xs text-amber-400 px-3 py-2 rounded-lg bg-amber-500/10 border border-amber-500/20">{linkError}</p>}
+                {placesFromLink.length > 0 && (
+                  <p className="text-xs text-emerald-400/90">{placesFromLink.length} place{placesFromLink.length !== 1 ? 's' : ''} loaded. The AI will include the best fits and add the rest as recommended stops.</p>
+                )}
+                <div>
+                  <label className="block text-xs font-medium text-slate-500 mb-1">Or paste place names (one per line)</label>
+                  <textarea
+                    value={pastedPlaces}
+                    onChange={(e) => setPastedPlaces(e.target.value)}
+                    placeholder={'Eiffel Tower\nLouvre Museum\nCafé de Flore'}
+                    rows={3}
+                    className="w-full px-4 py-3 rounded-xl bg-white/[0.06] border border-white/[0.08] text-white placeholder-slate-500 text-sm focus:border-blue-500/50 focus:ring-1 focus:ring-blue-500/30 outline-none resize-none"
+                  />
+                </div>
+              </section>
+
+              {error && (
+                <p className="text-xs text-red-400 px-3 py-2 rounded-xl bg-red-500/10 border border-red-500/20">{error}</p>
+              )}
+              <button type="submit" disabled={generating} className="btn-glow w-full py-3.5 text-sm">
+                <span>{generating ? 'Generating your itinerary…' : 'Generate itinerary'}</span>
               </button>
             </form>
           ) : (
-            <>
-              <p className="text-sm text-atlas-text-secondary">
-                {result.days.length} days, {result.days.reduce((n, d) => n + (d.locations?.length ?? 0), 0)} stops
-              </p>
-              {error && <p className="text-xs text-red-400 px-3 py-2 rounded-lg bg-red-500/10 border border-red-500/20">{error}</p>}
-              <div className="flex gap-3">
+            <div className="p-5 space-y-4">
+              <div className="rounded-xl bg-white/[0.04] border border-white/[0.08] p-4">
+                <p className="text-sm font-medium text-white mb-1">{result.days.length} days · {totalStops} stops</p>
+                {hasRecs && (
+                  <p className="text-xs text-slate-400">{result.recommended_additions.length} extra place{result.recommended_additions.length !== 1 ? 's' : ''} saved as recommended additions on your map.</p>
+                )}
+              </div>
+              <p className="text-xs text-slate-500">Review the full itinerary below before adding to your trip.</p>
+              <div className="space-y-4 max-h-[50vh] overflow-y-auto pr-1">
+                {result.days.map((d) => (
+                  <div key={d.day_number} className="rounded-xl bg-white/[0.04] border border-white/[0.06] overflow-hidden">
+                    <div className="flex items-center gap-2 px-4 py-2.5 border-b border-white/[0.06] bg-white/[0.02]">
+                      <span className="w-8 h-8 rounded-lg bg-blue-500/20 text-blue-300 text-sm font-semibold flex items-center justify-center">Day {d.day_number}</span>
+                      <span className="text-sm font-medium text-white">{d.theme || `Day ${d.day_number}`}</span>
+                    </div>
+                    <ul className="divide-y divide-white/[0.06]">
+                      {(d.locations || []).map((loc, idx) => (
+                        <li key={idx} className="px-4 py-3">
+                          <div className="flex items-start justify-between gap-2">
+                            <span className="text-sm font-medium text-white">{loc.name || 'Unnamed'}</span>
+                            <span className="flex-shrink-0 text-[10px] uppercase tracking-wide text-slate-500 bg-white/[0.06] px-2 py-0.5 rounded">{loc.type || 'attraction'}</span>
+                          </div>
+                          {loc.address && <p className="text-xs text-slate-500 mt-0.5">{loc.address}</p>}
+                          {loc.notes && <p className="text-xs text-slate-400 mt-1.5 leading-relaxed">{loc.notes}</p>}
+                          <p className="text-xs text-slate-500 mt-1">{loc.duration_minutes ?? 60} min</p>
+                        </li>
+                      ))}
+                    </ul>
+                  </div>
+                ))}
+              </div>
+              {error && (
+                <p className="text-xs text-red-400 px-3 py-2 rounded-xl bg-red-500/10 border border-red-500/20">{error}</p>
+              )}
+              <div className="flex gap-3 pt-1">
                 <button type="button" onClick={() => { setResult(null); setError(null); }} className="btn-ghost flex-1">
                   Back
                 </button>
                 <button type="button" onClick={handleApply} disabled={applying} className="btn-glow flex-1">
-                  {applying ? 'Applying…' : 'Apply to trip'}
+                  <span>{applying ? 'Applying…' : 'Apply to trip'}</span>
                 </button>
               </div>
-            </>
+            </div>
           )}
         </div>
       </div>
@@ -477,7 +695,7 @@ export default function TripDetailPage() {
     if (!trip) return [];
     return (trip.trip_days ?? [])
       .flatMap((d) => (d.trip_locations ?? []).map((l) => ({ ...l, _day_number: d.day_number })))
-      .filter((l) => typeof l.lat === 'number');
+      .filter((l) => typeof l.lat === 'number' && typeof l.lng === 'number' && Number.isFinite(l.lat) && Number.isFinite(l.lng) && !(l.lat === 0 && l.lng === 0));
   }, [trip]);
 
   const daysSorted = useMemo(
@@ -529,45 +747,83 @@ export default function TripDetailPage() {
     const prev = trip;
     if (!prev?.id) throw new Error('Trip not loaded');
     const existingDays = (prev.trip_days ?? []).slice().sort((a, b) => (a.day_number ?? 0) - (b.day_number ?? 0));
-    const existingNumbers = new Set(existingDays.map((d) => d.day_number));
-    const toInsert = (itinerary.days || []).filter((d) => !existingNumbers.has(d.day_number)).map((d) => ({
-      day_number: d.day_number ?? 0,
+    const norm = (n) => (n === undefined || n === null ? null : Number(n));
+    const existingNumbers = new Set(existingDays.map((d) => norm(d.day_number)).filter((n) => n != null));
+    const toInsert = (itinerary.days || []).filter((d) => !existingNumbers.has(norm(d.day_number))).map((d) => ({
+      day_number: norm(d.day_number) ?? 1,
       title: d.theme || `Day ${d.day_number}`,
     }));
-    if (toInsert.length > 0 && isOnline()) {
-      await insertTripDays(prev.id, toInsert);
-    }
-    let fetched = prev;
+
     if (isOnline()) {
-      const data = await fetchTrip(prev.id);
-      if (data) fetched = data;
-    }
-    const dayIdByNumber = new Map((fetched.trip_days ?? []).map((d) => [d.day_number, d.id]));
-    const locations = (itinerary.days || []).flatMap((genDay) =>
-      (genDay.locations || []).map((loc, order) => ({
+      if (toInsert.length > 0) await insertTripDays(prev.id, toInsert);
+      const fetched = await fetchTrip(prev.id);
+      if (!fetched) throw new Error('Could not load trip after adding days');
+      const dayIdByNumber = new Map((fetched.trip_days ?? []).map((d) => [norm(d.day_number), d.id]));
+      const dayIdsToFill = (itinerary.days || []).map((d) => dayIdByNumber.get(norm(d.day_number))).filter(Boolean);
+      if (dayIdsToFill.length > 0) await deleteLocationsByDayIds(dayIdsToFill);
+      const locations = (itinerary.days || []).flatMap((genDay) =>
+        (genDay.locations || []).map((loc, order) => ({
+          trip_id: prev.id,
+          day_id: dayIdByNumber.get(norm(genDay.day_number)),
+          name: loc.name || 'Unknown',
+          type: loc.type || 'attraction',
+          address: loc.address || null,
+          lat: loc.lat ?? null,
+          lng: loc.lng ?? null,
+          notes: loc.notes || null,
+          duration_minutes: loc.duration_minutes ?? 60,
+          visit_order: order,
+        }))
+      ).filter((l) => l.day_id);
+      if (locations.length > 0) await upsertLocations(locations);
+      if (Array.isArray(itinerary.recommended_additions) && itinerary.recommended_additions.length > 0) {
+        await updateTrip(prev.id, { sections: { ...(prev.sections || {}), recommended_additions: itinerary.recommended_additions } });
+      }
+      const updated = await fetchTrip(prev.id);
+      if (updated) {
+        const hasRecs = Array.isArray(itinerary.recommended_additions) && itinerary.recommended_additions.length > 0;
+        const finalTrip = hasRecs ? { ...updated, sections: { ...(updated.sections || {}), recommended_additions: itinerary.recommended_additions } } : updated;
+        setTrip(finalTrip);
+        cacheTrip(finalTrip);
+      }
+    } else {
+      const ts = Date.now();
+      const newDays = toInsert.map((d, i) => ({
+        id: `local-day-${ts}-${d.day_number}`,
         trip_id: prev.id,
-        day_id: dayIdByNumber.get(genDay.day_number),
-        name: loc.name || 'Unknown',
-        type: loc.type || 'attraction',
-        address: loc.address || null,
-        lat: loc.lat ?? null,
-        lng: loc.lng ?? null,
-        notes: loc.notes || null,
-        duration_minutes: loc.duration_minutes ?? 60,
-        visit_order: order,
-      }))
-    ).filter((l) => l.day_id);
-    if (locations.length > 0 && isOnline()) {
-      await upsertLocations(locations);
-    }
-    if (Array.isArray(itinerary.recommended_additions) && itinerary.recommended_additions.length > 0 && isOnline()) {
-      const sections = { ...(fetched.sections || {}), recommended_additions: itinerary.recommended_additions };
-      await updateTrip(prev.id, { sections });
-    }
-    const updated = isOnline() ? await fetchTrip(prev.id) : { ...fetched, trip_days: fetched.trip_days };
-    if (updated) {
-      const hasRecs = Array.isArray(itinerary.recommended_additions) && itinerary.recommended_additions.length > 0;
-      const finalTrip = hasRecs ? { ...updated, sections: { ...(updated.sections || {}), recommended_additions: itinerary.recommended_additions } } : updated;
+        day_number: d.day_number,
+        title: d.title || `Day ${d.day_number}`,
+        trip_locations: [],
+      }));
+      const mergedDays = [...existingDays, ...newDays].sort((a, b) => (a.day_number ?? 0) - (b.day_number ?? 0));
+      const dayIdByNumber = new Map(mergedDays.map((d) => [norm(d.day_number), d.id]));
+      const locsByDay = {};
+      (itinerary.days || []).forEach((genDay) => {
+        const dayId = dayIdByNumber.get(norm(genDay.day_number));
+        if (!dayId) return;
+        const dayLocs = (genDay.locations || []).map((loc, order) => ({
+          id: `local-${ts}-${genDay.day_number}-${order}`,
+          trip_id: prev.id,
+          day_id: dayId,
+          name: loc.name || 'Unknown',
+          type: loc.type || 'attraction',
+          address: loc.address || null,
+          lat: loc.lat ?? null,
+          lng: loc.lng ?? null,
+          notes: loc.notes || null,
+          duration_minutes: loc.duration_minutes ?? 60,
+          visit_order: order,
+        }));
+        locsByDay[dayId] = dayLocs;
+      });
+      const updatedDays = mergedDays.map((d) => ({ ...d, trip_locations: locsByDay[d.id] ?? [] }));
+      const finalTrip = {
+        ...prev,
+        trip_days: updatedDays,
+        sections: Array.isArray(itinerary.recommended_additions) && itinerary.recommended_additions.length > 0
+          ? { ...(prev.sections || {}), recommended_additions: itinerary.recommended_additions }
+          : prev.sections,
+      };
       setTrip(finalTrip);
       cacheTrip(finalTrip);
     }
@@ -613,6 +869,37 @@ export default function TripDetailPage() {
     });
   }
 
+  async function handleAddLocationFromMap(dayId, location) {
+    if (!trip?.id) return;
+    const day = (trip.trip_days ?? []).find((d) => d.id === dayId);
+    if (!day) return;
+    const visit_order = (day.trip_locations ?? []).length;
+    const notes = [location.notes, location.description].filter(Boolean).join('\n\n') || null;
+    const payload = {
+      trip_id: trip.id,
+      day_id: dayId,
+      name: location.name || 'Place',
+      type: location.type || 'attraction',
+      address: location.address ?? null,
+      lat: location.lat ?? null,
+      lng: location.lng ?? null,
+      notes,
+      duration_minutes: location.duration_minutes ?? 60,
+      visit_order,
+    };
+    try {
+      if (isOnline()) {
+        const [inserted] = await upsertLocations([payload]);
+        if (inserted) handleLocationAdded(inserted);
+      } else {
+        const tempId = `local-${Date.now()}-${dayId}`;
+        handleLocationAdded({ ...payload, id: tempId });
+      }
+    } catch (e) {
+      console.error(e);
+    }
+  }
+
   async function handleDeleteLocation(locId) {
     try {
       if (isOnline()) await deleteLocation(locId);
@@ -652,6 +939,14 @@ export default function TripDetailPage() {
     const base = optimisedRoute?.locations ?? allLocations;
     return base.filter((l) => (l._day_number ?? l.day_number) === mapDayFilter);
   }, [mapDayFilter, optimisedRoute?.locations, allLocations]);
+
+  const mapInitialCenter = useMemo(() => {
+    const first = allLocations[0];
+    if (first && Number.isFinite(first.lat) && Number.isFinite(first.lng) && !(first.lat === 0 && first.lng === 0)) {
+      return [first.lng, first.lat];
+    }
+    return [-74.006, 40.7128];
+  }, [allLocations]);
 
   /* ── Loading ──────────────────────────────────────────────────── */
   if (loading) {
@@ -825,7 +1120,15 @@ export default function TripDetailPage() {
                   style={{ animation: 'fade-in 0.5s both' }}>
                   <p className="text-4xl mb-3">📅</p>
                   <p className="text-white font-semibold mb-1">No days planned yet</p>
-                  <p className="text-atlas-text-muted text-sm">Add days via the API or import from Google Maps.</p>
+                  <p className="text-atlas-text-muted text-sm mb-4">Add days via the API or import from Google Maps.</p>
+                  <button
+                    type="button"
+                    onClick={() => setShowItineraryGen(true)}
+                    className="btn-glow px-5 py-2.5 text-sm flex items-center gap-2 mx-auto"
+                  >
+                    <span className="opacity-90">✨</span>
+                    Generate with AI
+                  </button>
                 </div>
               ) : (
                 daysSorted.map((day, i) => (
@@ -875,7 +1178,7 @@ export default function TripDetailPage() {
                   ))}
                 </div>
               )}
-              <Map
+              <MapView
                 locations={mapLocations}
                 routeGeoJSON={routeGeoJSON}
                 activeId={activeLocId}
@@ -884,12 +1187,11 @@ export default function TripDetailPage() {
                   const dayNum = loc._day_number ?? loc.day_number;
                   if (dayNum != null) setMapDayFilter(dayNum);
                 }}
+                onMapClick={() => setActiveLocId(null)}
+                days={daysSorted}
+                onAddLocationToDay={handleAddLocationFromMap}
                 className="w-full h-full"
-                initialCenter={
-                  allLocations[0]
-                    ? [allLocations[0].lng, allLocations[0].lat]
-                    : [-74.006, 40.7128]
-                }
+                initialCenter={mapInitialCenter}
                 initialZoom={allLocations.length > 0 ? 11 : 2}
               />
 
@@ -944,6 +1246,14 @@ export default function TripDetailPage() {
           days={daysSorted}
           onClose={() => { setShowAddModal(false); setAddingToDay(null); }}
           onAdded={handleLocationAdded}
+        />
+      )}
+
+      {showItineraryGen && trip && (
+        <AIItineraryModal
+          trip={trip}
+          onClose={() => setShowItineraryGen(false)}
+          onApply={handleApplyItinerary}
         />
       )}
     </>

@@ -121,11 +121,11 @@ export async function createTrip(userId, tripData) {
   return data;
 }
 
-/** Update an existing trip */
+/** Update an existing trip (only sends fields in updates; no updated_at to avoid schema cache errors if column is missing) */
 export async function updateTrip(tripId, updates) {
   const { data, error } = await supabase
     .from('trips')
-    .update({ ...updates, updated_at: new Date().toISOString() })
+    .update(updates)
     .eq('id', tripId)
     .select()
     .single();
@@ -177,5 +177,15 @@ export async function deleteLocation(locationId) {
     .from('trip_locations')
     .delete()
     .eq('id', locationId);
+  if (error) throw error;
+}
+
+/** Delete all locations for the given day IDs (e.g. before replacing with AI itinerary to avoid duplicates) */
+export async function deleteLocationsByDayIds(dayIds) {
+  if (!Array.isArray(dayIds) || dayIds.length === 0) return;
+  const { error } = await supabase
+    .from('trip_locations')
+    .delete()
+    .in('day_id', dayIds);
   if (error) throw error;
 }
