@@ -1,3 +1,4 @@
+"use client";
 /**
  * Globe.js — Enhanced Cinematic 3D Globe
  *

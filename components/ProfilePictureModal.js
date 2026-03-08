@@ -1,3 +1,4 @@
+"use client";
 /**
  * ProfilePictureModal.js — Change profile picture
  *

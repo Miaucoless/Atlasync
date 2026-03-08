@@ -41,18 +41,19 @@ export default function TripDayCard({
     return haversineDistance(a.lat, a.lng, b.lat, b.lng);
   }
 
-  /* Fetch ratings when a location is expanded */
+  /* Fetch ratings when a location is expanded (only when expandedLocId changes) */
   useEffect(() => {
     if (!expandedLocId) {
       setLocationRatings(null);
       return;
     }
-    const loc = sorted.find((l) => l.id === expandedLocId);
+    const loc = locations.find((l) => l.id === expandedLocId);
     if (!loc?.name) {
       setLocationRatings(null);
       return;
     }
     setLocationRatings(null);
+    let cancelled = false;
     fetch('/api/ratings/aggregate', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
@@ -60,9 +61,10 @@ export default function TripDayCard({
     })
       .then((r) => r.json())
       .then((data) => (data && typeof data.available === 'boolean' ? data : { available: false, sources: [] }))
-      .then(setLocationRatings)
-      .catch(() => setLocationRatings({ available: false, sources: [] }));
-  }, [expandedLocId, sorted]);
+      .then((data) => { if (!cancelled) setLocationRatings(data); })
+      .catch(() => { if (!cancelled) setLocationRatings({ available: false, sources: [] }); });
+    return () => { cancelled = true; };
+  }, [expandedLocId]);
 
   return (
     <div className={`glass rounded-2xl overflow-hidden transition-all duration-300 ${className}`}>

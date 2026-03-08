@@ -1,3 +1,4 @@
+"use client";
 /**
  * AIChat.js — Enhanced
  *

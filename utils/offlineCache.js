@@ -1,3 +1,4 @@
+"use client";
 /**
  * offlineCache.js
  * Offline-first caching layer using localStorage (with a graceful

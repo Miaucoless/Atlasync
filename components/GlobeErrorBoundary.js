@@ -1,3 +1,4 @@
+"use client";
 /**
  * GlobeErrorBoundary.js
  * Catches WebGL/Three.js errors in Globe to prevent crash-triggered dev reload loops.

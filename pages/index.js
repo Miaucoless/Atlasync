@@ -1,3 +1,4 @@
+"use client";
 /**
  * pages/index.js — Enhanced Landing Page
  *

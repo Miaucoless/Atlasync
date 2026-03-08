@@ -10,6 +10,7 @@ import { useEffect } from 'react';
 import Layout from '../components/Layout';
 import { initCache, seedDemoData } from '../utils/offlineCache';
 import '../styles/globals.css';
+import 'mapbox-gl/dist/mapbox-gl.css';
 
 export default function App({ Component, pageProps }) {
   // Initialise offline cache & seed demo data on first load

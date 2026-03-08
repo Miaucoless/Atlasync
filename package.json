@@ -19,5 +19,8 @@
     "react-dom": "18.x",
     "tailwindcss": "^3.3.0",
     "three": "^0.158.0"
+  },
+  "devDependencies": {
+    "eslint": "^10.0.3"
   }
 }

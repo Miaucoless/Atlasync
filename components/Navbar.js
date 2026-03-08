@@ -1,3 +1,4 @@
+"use client";
 /**
  * Navbar.js
  * Top navigation bar — glassmorphism, scroll blur, icon links,

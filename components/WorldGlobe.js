@@ -1,3 +1,4 @@
+"use client";
 /**
  * WorldGlobe.js — Amplified 3D Globe for the World Explorer page
  *

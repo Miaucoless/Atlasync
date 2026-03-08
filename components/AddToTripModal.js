@@ -1,3 +1,4 @@
+"use client";
 /**
  * AddToTripModal.js — Add Any Location to a Trip
  *

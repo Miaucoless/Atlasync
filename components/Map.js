@@ -9,6 +9,8 @@
  *  ✦ Active marker pulse ring synced to card state
  */
 
+console.log('[Map] Map.js loaded');
+
 import { useEffect, useLayoutEffect, useRef, useState, useCallback } from 'react';
 import { searchPlaces, getPlaceDetailsByLocation } from '../services/places';
 import { debounce, changedKey } from '../lib/async-guards';
@@ -267,6 +269,7 @@ export default function Map({
   initialCenter         = [-74.0060, 40.7128],
   initialZoom           = 2,
 }) {
+  console.log('[Map] Map component rendered', { locations: locations?.length });
   const mapContainer   = useRef(null);
   const mapRef         = useRef(null);
   const markersRef     = useRef([]);
@@ -292,12 +295,18 @@ export default function Map({
   const locs = safeLocations(locations);
   const activeLoc = activeId ? locs.find((l) => l.id === activeId) : null;
 
-  /* ── Initialise Mapbox (useLayoutEffect so container ref is set and has size) ────────────────── */
+/* ── Initialise Mapbox (useLayoutEffect so container ref is set and has size) ────────────────── */
   useLayoutEffect(() => {
     const container = mapContainer.current;
-    if (!container || mapRef.current) return;
+    console.log('[Map] Initializing, container:', !!container, 'mapRef:', !!mapRef.current);
+
+    if (!container || mapRef.current) {
+      console.log('[Map] Early return - no container or map already exists');
+      return;
+    }
 
     if (!MAPBOX_TOKEN) {
+      console.log('[Map] No Mapbox token!');
       setError('Mapbox token missing. Set NEXT_PUBLIC_MAPBOX_TOKEN in .env.local');
       return;
     }
@@ -306,51 +315,105 @@ export default function Map({
     viewModeRef.current = styleProp === STYLE_DARK ? 'dark' : 'street';
     currentStyleRef.current = initialStyle;
 
-    import('mapbox-gl').then((mod) => {
-      // Guard: if the component unmounted before the import resolved, bail out.
-      if (!document.body.contains(container)) return;
+    let cancelled = false;
+    let retryCount = 0;
+    const MAX_RETRIES = 20; // Max ~1 second of retries
 
-      const mapboxgl = mod.default;
-      mapboxgl.accessToken = MAPBOX_TOKEN;
+    // Wait for container to have dimensions before initializing Mapbox
+    const initMap = () => {
+      if (cancelled) return;
 
-      const map = new mapboxgl.Map({
-        container,
-        style:       initialStyle,
-        center:       initialCenter,
-        zoom:         initialZoom,
-        projection:   initialStyle === STYLE_DARK ? 'globe' : 'mercator',
-        antialias:    true,
-        logoPosition: 'bottom-right',
-      });
+      const w = container.offsetWidth;
+      const h = container.offsetHeight;
+      console.log('[Map] Container dimensions check:', w, 'x', h, 'retry:', retryCount);
 
-      map.on('style.load', () => {
-        if (viewModeRef.current === 'dark') {
-          map.setFog({
-            color:           'rgb(5, 8, 16)',
-            'high-color':    'rgb(10, 20, 50)',
-            'horizon-blend':  0.04,
-            'space-color':   'rgb(5, 8, 16)',
-            'star-intensity': 0.1,
-          });
+      if ((!w || !h) && retryCount < MAX_RETRIES) {
+        retryCount++;
+        console.log('[Map] Container not ready, waiting...');
+        requestAnimationFrame(initMap);
+        return;
+      }
+
+      if (!w || !h) {
+        console.error('[Map] Container never got dimensions after', MAX_RETRIES, 'retries');
+        setError('Map container has no size. Check CSS and layout.');
+        return;
+      }
+
+      console.log('[Map] Container ready! Loading Mapbox...');
+
+      import('mapbox-gl').then((mod) => {
+        if (cancelled) {
+          console.log('[Map] Init cancelled during import');
+          return;
         }
-        // Resize immediately and again after a tick to ensure container has settled.
-        map.resize();
-        requestAnimationFrame(() => { map.resize(); });
-        setMapReady(true);
+
+        // Guard: if the component unmounted before the import resolved, bail out.
+        if (!document.body.contains(container)) {
+          console.log('[Map] Container removed from DOM, aborting');
+          return;
+        }
+
+        const mapboxgl = mod.default;
+        mapboxgl.accessToken = MAPBOX_TOKEN;
+
+        console.log('[Map] Creating map instance...');
+        const map = new mapboxgl.Map({
+          container,
+          style:       initialStyle,
+          center:      initialCenter,
+          zoom:        initialZoom,
+          projection:  initialStyle === STYLE_DARK ? 'globe' : 'mercator',
+          antialias:   true,
+          logoPosition: 'bottom-right',
+        });
+
+        map.on('style.load', () => {
+          console.log('[Map] Style loaded');
+          if (viewModeRef.current === 'dark') {
+            map.setFog({
+              color:           'rgb(5, 8, 16)',
+              'high-color':    'rgb(10, 20, 50)',
+              'horizon-blend':  0.04,
+              'space-color':   'rgb(5, 8, 16)',
+              'star-intensity': 0.1,
+            });
+          }
+          // Resize immediately and again after a tick to ensure container has settled.
+          map.resize();
+          requestAnimationFrame(() => {
+            if (cancelled) return;
+            map.resize();
+            setMapReady(true);
+            console.log('[Map] Map ready!');
+          });
+        });
+
+        map.on('error', (e) => {
+          console.error('[Map] Mapbox error:', e.error);
+        });
+
+        map.addControl(new mapboxgl.NavigationControl({ showCompass: false }), 'bottom-right');
+
+        mapRef.current = map;
+      }).catch((err) => {
+        console.error('[Map] Failed to load mapbox-gl:', err);
+        setError(`Map failed to load: ${err.message || 'Unknown error'}`);
       });
+    };
 
-      map.addControl(new mapboxgl.NavigationControl({ showCompass: false }), 'bottom-right');
-
-      mapRef.current = map;
-    }).catch((err) => {
-      console.error('[Map] Failed to load mapbox-gl:', err);
-      setError('Map failed to load. Check your Mapbox token.');
+    // Start initialization after paint
+    requestAnimationFrame(() => {
+      requestAnimationFrame(initMap);
     });
 
     return () => {
+      cancelled = true;
       if (dashOffsetRef.current) cancelAnimationFrame(dashOffsetRef.current);
-      mapRef.current?.remove();
-      mapRef.current = null;
+      if (mapRef.current) {
+        mapRef.current.remove();
+        mapRef.current = null;
+      }
       markersRef.current = [];
     };
     // eslint-disable-next-line react-hooks/exhaustive-deps
@@ -465,7 +528,13 @@ export default function Map({
     if (!mapReady || !mapRef.current) return;
 
     const map = mapRef.current;
-    map.resize();
+    
+    // Ensure map is properly sized before adding markers
+    try {
+      map.resize();
+    } catch (e) {
+      console.warn('[Map] Resize failed:', e);
+    }
 
     const validLocations = safeLocations(locations)
       .map(normalizeLocation)
@@ -475,42 +544,56 @@ export default function Map({
     const addMarkers = () => {
       import('mapbox-gl').then(({ default: mapboxgl }) => {
         if (!mapRef.current) return;
-        markersRef.current.forEach((m) => m.remove());
+        
+        // Clean up existing markers
+        markersRef.current.forEach((m) => {
+          try {
+            m.remove();
+          } catch (e) {
+            console.warn('[Map] Failed to remove marker:', e);
+          }
+        });
         markersRef.current = [];
 
         const filters = activeCategoryFilters && activeCategoryFilters.length > 0;
         validLocations.forEach((loc, idx) => {
-          const isSelected = loc.id === activeId;
-          const emphasized = !filters || activeCategoryFilters.includes(loc.type);
-          const el = isSelected
-            ? createPinOnlyEl(loc.type, idx * 80)
-            : createPinWithLabelEl(loc.name, loc.type, idx * 80);
-          if (!emphasized) {
-            el.style.opacity = '0.4';
-            el.style.filter = 'grayscale(0.6)';
-          }
-
-          const marker = new mapboxgl.Marker({ element: el, anchor: 'bottom' })
-            .setLngLat([loc.lng, loc.lat])
-            .addTo(mapRef.current);
-
-          el.addEventListener('click', (e) => {
-            e.stopPropagation();
-            onMarkerClick(loc);
-            if (mapRef.current) {
-              const m = mapRef.current;
-              const currentZoom = m.getZoom();
-              const center = [loc.lng, loc.lat];
-              if (currentZoom >= MIN_ZOOM_TO_PAN_ONLY) {
-                m.easeTo({ center, zoom: currentZoom, duration: 400 });
-              } else {
-                m.flyTo({ center, zoom: STREET_ZOOM, duration: 800, curve: 1.2 });
-              }
+          try {
+            const isSelected = loc.id === activeId;
+            const emphasized = !filters || activeCategoryFilters.includes(loc.type);
+            const el = isSelected
+              ? createPinOnlyEl(loc.type, idx * 80)
+              : createPinWithLabelEl(loc.name, loc.type, idx * 80);
+            if (!emphasized) {
+              el.style.opacity = '0.4';
+              el.style.filter = 'grayscale(0.6)';
             }
-          });
 
-          markersRef.current.push(marker);
+            const marker = new mapboxgl.Marker({ element: el, anchor: 'bottom' })
+              .setLngLat([loc.lng, loc.lat])
+              .addTo(mapRef.current);
+
+            el.addEventListener('click', (e) => {
+              e.stopPropagation();
+              onMarkerClick(loc);
+              if (mapRef.current) {
+                const m = mapRef.current;
+                const currentZoom = m.getZoom();
+                const center = [loc.lng, loc.lat];
+                if (currentZoom >= MIN_ZOOM_TO_PAN_ONLY) {
+                  m.easeTo({ center, zoom: currentZoom, duration: 400 });
+                } else {
+                  m.flyTo({ center, zoom: STREET_ZOOM, duration: 800, curve: 1.2 });
+                }
+              }
+            });
+
+            markersRef.current.push(marker);
+          } catch (e) {
+            console.error('[Map] Failed to add marker for location:', loc.name, e);
+          }
         });
+      }).catch((err) => {
+        console.error('[Map] Failed to import mapbox-gl for markers:', err);
       });
     };
 
@@ -818,9 +901,14 @@ export default function Map({
       dashOffsetRef.current = null;
     }
 
-    if (map.getLayer('route-line'))  map.removeLayer('route-line');
-    if (map.getLayer('route-glow'))  map.removeLayer('route-glow');
-    if (map.getSource('route'))      map.removeSource('route');
+    // Remove existing route layers and source
+    try {
+      if (map.getLayer('route-line'))  map.removeLayer('route-line');
+      if (map.getLayer('route-glow'))  map.removeLayer('route-glow');
+      if (map.getSource('route'))      map.removeSource('route');
+    } catch (e) {
+      console.warn('[Map] Error removing route layers:', e);
+    }
 
     if (!routeGeoJSON) return;
 
@@ -839,80 +927,90 @@ export default function Map({
       }],
     };
 
-    map.addSource('route', { type: 'geojson', data: emptyGeoJSON });
+    try {
+      map.addSource('route', { type: 'geojson', data: emptyGeoJSON });
 
-    // Glow layer
-    map.addLayer({
-      id:     'route-glow',
-      type:   'line',
-      source: 'route',
-      layout: { 'line-join': 'round', 'line-cap': 'round' },
-      paint:  {
-        'line-color':   '#3B82F6',
-        'line-width':   8,
-        'line-opacity': 0.18,
-        'line-blur':    4,
-      },
-    });
+      // Glow layer
+      map.addLayer({
+        id:     'route-glow',
+        type:   'line',
+        source: 'route',
+        layout: { 'line-join': 'round', 'line-cap': 'round' },
+        paint:  {
+          'line-color':   '#3B82F6',
+          'line-width':   8,
+          'line-opacity': 0.18,
+          'line-blur':    4,
+        },
+      });
 
-    // Main dashed line (line-dash-offset will be animated after draw)
-    map.addLayer({
-      id:     'route-line',
-      type:   'line',
-      source: 'route',
-      layout: { 'line-join': 'round', 'line-cap': 'round' },
-      paint:  {
-        'line-color':       '#3B82F6',
-        'line-width':       2.5,
-        'line-opacity':     0.9,
-        'line-dasharray':   [4, 2],
-        'line-dash-offset': 0,
-      },
-    });
+      // Main dashed line (line-dash-offset will be animated after draw)
+      map.addLayer({
+        id:     'route-line',
+        type:   'line',
+        source: 'route',
+        layout: { 'line-join': 'round', 'line-cap': 'round' },
+        paint:  {
+          'line-color':       '#3B82F6',
+          'line-width':       2.5,
+          'line-opacity':     0.9,
+          'line-dasharray':   [4, 2],
+          'line-dash-offset': 0,
+        },
+      });
 
-    // Animate: reveal coordinates one by one
-    let step = 0;
-    const totalSteps = allCoords.length;
-    const stepsPerFrame = Math.max(1, Math.ceil(totalSteps / 60)); // ~1s to draw
+      // Animate: reveal coordinates one by one
+      let step = 0;
+      const totalSteps = allCoords.length;
+      const stepsPerFrame = Math.max(1, Math.ceil(totalSteps / 60)); // ~1s to draw
 
-    function drawStep() {
-      step = Math.min(step + stepsPerFrame, totalSteps);
-      if (map.getSource('route')) {
-        map.getSource('route').setData({
-          type: 'FeatureCollection',
-          features: [{
-            type: 'Feature',
-            geometry: { type: 'LineString', coordinates: allCoords.slice(0, step) },
-          }],
-        });
-      }
-      if (step < totalSteps) {
-        dashOffsetRef.current = requestAnimationFrame(drawStep);
-      } else {
-        // Once drawn, animate line-dash-offset for a flowing marching-ants effect
-        let offset = 0;
-        function animateDash() {
-          offset = (offset - 0.4 + 24) % 24;
-          if (map.getLayer('route-line')) {
-            map.setPaintProperty('route-line', 'line-dash-offset', -offset);
-          }
-          dashOffsetRef.current = requestAnimationFrame(animateDash);
+      function drawStep() {
+        step = Math.min(step + stepsPerFrame, totalSteps);
+        if (map.getSource('route')) {
+          map.getSource('route').setData({
+            type: 'FeatureCollection',
+            features: [{
+              type: 'Feature',
+              geometry: { type: 'LineString', coordinates: allCoords.slice(0, step) },
+            }],
+          });
         }
-        animateDash();
+        if (step < totalSteps) {
+          dashOffsetRef.current = requestAnimationFrame(drawStep);
+        } else {
+          // Once drawn, animate line-dash-offset for a flowing marching-ants effect
+          let offset = 0;
+          function animateDash() {
+            offset = (offset - 0.4 + 24) % 24;
+            if (map.getLayer('route-line')) {
+              map.setPaintProperty('route-line', 'line-dash-offset', -offset);
+            }
+            dashOffsetRef.current = requestAnimationFrame(animateDash);
+          }
+          animateDash();
+        }
       }
-    }
 
-    // Small initial delay so map renders first
-    const t = setTimeout(() => { drawStep(); }, 400);
-    return () => clearTimeout(t);
+      // Small initial delay so map renders first
+      const t = setTimeout(() => { drawStep(); }, 400);
+      return () => clearTimeout(t);
+    } catch (e) {
+      console.error('[Map] Error adding route layers:', e);
+    }
   }, [routeGeoJSON, mapReady, styleVersion]);
 
   /* ── Day route (Geoapify driving/walk line): layer id day-route ─── */
   useEffect(() => {
     if (!mapReady || !mapRef.current) return;
     const map = mapRef.current;
-    if (map.getLayer('day-route')) map.removeLayer('day-route');
-    if (map.getSource('day-route')) map.removeSource('day-route');
+    
+    // Clean up existing day route layers
+    try {
+      if (map.getLayer('day-route')) map.removeLayer('day-route');
+      if (map.getSource('day-route')) map.removeSource('day-route');
+    } catch (e) {
+      console.warn('[Map] Error removing day-route layers:', e);
+    }
 
     if (!dayRouteGeoJSON?.features?.length) return;
     const feat = dayRouteGeoJSON.features[0];
@@ -923,22 +1021,31 @@ export default function Map({
       type: 'FeatureCollection',
       features: [{ type: 'Feature', geometry: { type: 'LineString', coordinates: coords }, properties: {} }],
     };
-    map.addSource('day-route', { type: 'geojson', data: fc });
-    map.addLayer({
-      id: 'day-route',
-      type: 'line',
-      source: 'day-route',
-      layout: { 'line-join': 'round', 'line-cap': 'round' },
-      paint: {
-        'line-color': '#10B981',
-        'line-width': 5,
-        'line-opacity': 0.95,
-      },
-    });
+    
+    try {
+      map.addSource('day-route', { type: 'geojson', data: fc });
+      map.addLayer({
+        id: 'day-route',
+        type: 'line',
+        source: 'day-route',
+        layout: { 'line-join': 'round', 'line-cap': 'round' },
+        paint: {
+          'line-color': '#10B981',
+          'line-width': 5,
+          'line-opacity': 0.95,
+        },
+      });
+    } catch (e) {
+      console.error('[Map] Error adding day-route layer:', e);
+    }
 
     return () => {
-      if (map.getLayer('day-route')) map.removeLayer('day-route');
-      if (map.getSource('day-route')) map.removeSource('day-route');
+      try {
+        if (map.getLayer('day-route')) map.removeLayer('day-route');
+        if (map.getSource('day-route')) map.removeSource('day-route');
+      } catch (e) {
+        console.warn('[Map] Error cleaning up day-route:', e);
+      }
     };
   }, [mapReady, styleVersion, dayRouteGeoJSON]);
 
@@ -1010,7 +1117,7 @@ export default function Map({
   }
 
   return (
-    <div className={`relative rounded-2xl overflow-hidden ${className}`} style={{ minHeight: 500, height: '100%' }}>
+    <div className={`atlas-map-container relative rounded-2xl overflow-hidden ${className}`} style={{ minHeight: 500, height: '100%' }}>
       {/* height: 100% ensures Mapbox reads a non-zero clientHeight on init */}
       <div ref={mapContainer} className="absolute inset-0 w-full" style={{ minHeight: 500, height: '100%' }} />
 
